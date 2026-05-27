@@ -422,6 +422,14 @@ class BotSession {
     async runLoop(subIndex) {
         let consecutiveEmpty = 0;
         let consecutiveErrors = 0;
+        let backoffLevel = 0; // 0=normal, 1=slow, 2=very slow, 3=hibernating
+        const BACKOFF_INTERVALS = [
+            { maxEmpty: 3, waitSec: 15, label: 'buscando...' },        // Primeiras 3 tentativas: 15s
+            { maxEmpty: 8, waitSec: 60, label: 'aguardando (1min)' },   // 4-8: 1 min
+            { maxEmpty: 15, waitSec: 180, label: 'aguardando (3min)' }, // 9-15: 3 min
+            { maxEmpty: 30, waitSec: 300, label: 'hibernando (5min)' }, // 16-30: 5 min
+            { maxEmpty: Infinity, waitSec: 600, label: 'hibernando (10min)' } // 30+: 10 min
+        ];
 
         while (!this.stopRequested) {
             try {
@@ -431,28 +439,39 @@ class BotSession {
                     consecutiveEmpty++;
                     this.consecutiveEmpty = consecutiveEmpty;
 
-                    // IP exhausted - rotate if proxy enabled
-                    if (consecutiveEmpty >= CONFIG.IP_EXHAUSTED_THRESHOLD && this.proxyConfig && this.proxyConfig.enabled) {
-                        this.addLog(`[${this.email}#${subIndex}] 🔄 IP esgotado (${consecutiveEmpty}x sem sites), rotacionando...`, 'warning');
+                    // Determine backoff level
+                    const backoff = BACKOFF_INTERVALS.find(b => consecutiveEmpty <= b.maxEmpty) || BACKOFF_INTERVALS[BACKOFF_INTERVALS.length - 1];
+                    const waitSec = backoff.waitSec;
+
+                    // IP exhausted - rotate if proxy enabled (only in first levels)
+                    if (consecutiveEmpty === CONFIG.IP_EXHAUSTED_THRESHOLD && this.proxyConfig && this.proxyConfig.enabled) {
+                        this.addLog(`[${this.email}#${subIndex}] 🔄 IP esgotado, rotacionando...`, 'warning');
                         this.status = 'rotating';
                         this._rotateIp(subIndex);
-                        consecutiveEmpty = 0;
-                        this.consecutiveEmpty = 0;
                         this.addLog(`[${this.email}#${subIndex}] ✓ Novo IP ativo (rotação #${this.rotationCount})`, 'info');
                         await sleep(3000);
                         continue;
                     }
 
-                    if (consecutiveEmpty <= 3 || consecutiveEmpty % 10 === 0) {
-                        this.addLog(`[${this.email}#${subIndex}] Sem sites disponíveis (${consecutiveEmpty}x), aguardando...`);
+                    // Log only on transitions and periodically
+                    if (consecutiveEmpty === 1 || consecutiveEmpty === 4 || consecutiveEmpty === 9 || consecutiveEmpty === 16 || consecutiveEmpty === 31 || consecutiveEmpty % 50 === 0) {
+                        const nextCheck = waitSec >= 60 ? `${Math.floor(waitSec/60)}min` : `${waitSec}s`;
+                        this.addLog(`[${this.email}#${subIndex}] Sem tarefas disponíveis. Próxima verificação em ${nextCheck}. (Total tentativas: ${consecutiveEmpty})`);
                     }
-                    this.status = 'waiting';
-                    const waitTime = Math.min(10 + consecutiveEmpty * 5, 30);
-                    for (let i = 0; i < waitTime; i++) {
+
+                    this.status = `no_tasks (${backoff.label})`;
+                    
+                    // Wait with stop check
+                    for (let i = 0; i < waitSec; i++) {
                         if (this.stopRequested) return;
                         await sleep(1000);
                     }
                     continue;
+                }
+
+                // Sites found! Reset counters
+                if (consecutiveEmpty > 0) {
+                    this.addLog(`[${this.email}#${subIndex}] ✓ Tarefas disponíveis novamente! (${sites.length} sites encontrados)`, 'success');
                 }
                 consecutiveEmpty = 0;
                 this.consecutiveEmpty = 0;
