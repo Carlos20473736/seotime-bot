@@ -1,11 +1,10 @@
 // SeoTime Bot - Frontend
 const socket = io();
-let accountCount = 1;
+let accountCount = 0;
 const MAX_ACCOUNTS = 20;
-const sessionsData = {};
 
 // ─── Account Management ───────────────────────────────────────────────────────
-function addAccount() {
+function addAccountRow(email = '', password = '', sessions = 1) {
     if (accountCount >= MAX_ACCOUNTS) return;
     accountCount++;
     updateAccountCount();
@@ -16,13 +15,17 @@ function addAccount() {
     row.dataset.index = accountCount - 1;
     row.innerHTML = `
         <span class="num">${accountCount}</span>
-        <input type="text" placeholder="Email / Login" class="acc-email">
-        <input type="password" placeholder="Senha" class="acc-password">
-        <input type="number" value="1" min="1" max="15" class="acc-sessions" title="Sessões simultâneas">
+        <input type="text" placeholder="Email / Login" class="acc-email" value="${email}">
+        <input type="password" placeholder="Senha" class="acc-password" value="${password}">
+        <input type="number" value="${sessions}" min="1" max="15" class="acc-sessions" title="Sessões simultâneas">
         <span class="label-sess">sess.</span>
         <button class="btn-remove" onclick="removeAccount(this)" title="Remover conta">✕</button>
     `;
     container.appendChild(row);
+}
+
+function addAccount() {
+    addAccountRow();
 }
 
 function removeAccount(btn) {
@@ -84,13 +87,18 @@ function addLog(message, type = '') {
     const logBox = document.getElementById('log_box');
     const entry = document.createElement('div');
     entry.className = 'log-entry ' + type;
-    const time = new Date().toLocaleTimeString('pt-BR');
-    entry.textContent = `[${time}] ${message}`;
+    // If message already has timestamp, use as-is
+    if (message.startsWith('[')) {
+        entry.textContent = message;
+    } else {
+        const time = new Date().toLocaleTimeString('pt-BR');
+        entry.textContent = `[${time}] ${message}`;
+    }
     logBox.appendChild(entry);
     logBox.scrollTop = logBox.scrollHeight;
 
-    // Keep max 200 entries
-    while (logBox.children.length > 200) {
+    // Keep max 300 entries
+    while (logBox.children.length > 300) {
         logBox.removeChild(logBox.firstChild);
     }
 }
@@ -98,9 +106,10 @@ function addLog(message, type = '') {
 // ─── Socket Events ────────────────────────────────────────────────────────────
 socket.on('log', (msg) => {
     let type = '';
-    if (msg.includes('✓') || msg.includes('concluída')) type = 'success';
+    if (msg.includes('✓') || msg.includes('concluída') || msg.includes('Login OK')) type = 'success';
     else if (msg.includes('✗') || msg.includes('Erro') || msg.includes('falhou')) type = 'error';
-    else if (msg.includes('Iniciando') || msg.includes('Login')) type = 'info';
+    else if (msg.includes('Iniciando') || msg.includes('⏳') || msg.includes('aguardando')) type = 'warning';
+    else if (msg.includes('Conectado') || msg.includes('Fazendo')) type = 'info';
     addLog(msg, type);
 });
 
@@ -110,8 +119,12 @@ socket.on('status_update', (data) => {
     text.textContent = data.status;
     if (data.status === 'ONLINE') {
         dot.classList.add('online');
+        document.getElementById('btn_start').disabled = true;
+        document.getElementById('btn_start').style.opacity = '0.5';
     } else {
         dot.classList.remove('online');
+        document.getElementById('btn_start').disabled = false;
+        document.getElementById('btn_start').style.opacity = '1';
     }
 });
 
@@ -123,11 +136,9 @@ socket.on('stats_update', (data) => {
 
 socket.on('session_update', (data) => {
     const tbody = document.getElementById('sessions_table');
-    // Remove empty row
     const emptyRow = tbody.querySelector('.empty-row');
     if (emptyRow) emptyRow.remove();
 
-    // Update or create row
     let row = document.getElementById('session_' + data.id);
     if (!row) {
         row = document.createElement('tr');
@@ -136,8 +147,9 @@ socket.on('session_update', (data) => {
     }
 
     const statusColor = data.status === 'viewing' ? 'var(--success)' :
-                        data.status === 'error' ? 'var(--danger)' :
-                        data.status === 'waiting' ? 'var(--warning)' : 'var(--text-secondary)';
+                        data.status === 'error' || data.status === 'stopped' ? 'var(--danger)' :
+                        data.status === 'waiting' || data.status === 'rate_limited' ? 'var(--warning)' :
+                        data.status === 'logged_in' ? 'var(--success)' : 'var(--text-secondary)';
 
     row.innerHTML = `
         <td>${data.email}</td>
@@ -149,6 +161,10 @@ socket.on('session_update', (data) => {
         <td>${data.earned} ₽</td>
         <td title="${data.currentSite}">${data.currentSite}</td>
     `;
+});
+
+socket.on('sessions_clear', () => {
+    document.getElementById('sessions_table').innerHTML = '<tr class="empty-row"><td colspan="8">Nenhuma sessão ativa</td></tr>';
 });
 
 socket.on('online_users', (users) => {
@@ -170,12 +186,35 @@ socket.on('online_users', (users) => {
     `).join('');
 });
 
+// ─── Saved Accounts (auto-fill from server persistence) ──────────────────────
+socket.on('saved_accounts', (data) => {
+    const emails = Object.keys(data);
+    if (emails.length === 0 && accountCount === 0) {
+        // No saved accounts, add one empty row
+        addAccountRow();
+        return;
+    }
+    if (emails.length > 0 && accountCount === 0) {
+        // Fill from saved data
+        const container = document.getElementById('accounts_container');
+        container.innerHTML = '';
+        accountCount = 0;
+        for (const email of emails) {
+            const info = data[email];
+            addAccountRow(info.email, info.password, info.sessions || 1);
+        }
+    }
+});
+
 socket.on('connect', () => {
     addLog('Conectado ao servidor.', 'info');
 });
 
 socket.on('disconnect', () => {
-    addLog('Desconectado do servidor.', 'error');
+    addLog('Desconectado do servidor. (Bots continuam rodando no servidor)', 'error');
     document.getElementById('status_dot').classList.remove('online');
-    document.getElementById('status_text').textContent = 'OFFLINE';
+    document.getElementById('status_text').textContent = 'DESCONECTADO';
 });
+
+// ─── Initialize ──────────────────────────────────────────────────────────────
+// Don't add empty row on load - wait for saved_accounts event

@@ -3,6 +3,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const crypto = require('crypto');
+const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
@@ -21,13 +22,53 @@ const CONFIG = {
     VERSION_CODE: '12',
     VERSION_NAME: '1.4.5',
     MAX_ACCOUNTS: 20,
-    POLL_INTERVAL: 30000,  // 30s between site fetches
-    VIEW_EXTRA_WAIT: 2000, // extra wait after timer
+    POLL_INTERVAL: 30000,
+    VIEW_EXTRA_WAIT: 2000,
 };
 
-// ─── State ────────────────────────────────────────────────────────────────────
-const sessions = new Map(); // sessionId -> session state
-const onlineUsers = new Map(); // global online users tracking
+// ─── Persistence ─────────────────────────────────────────────────────────────
+const PERSISTENCE_FILE = path.join(__dirname, 'active_bots.json');
+
+function loadActiveBots() {
+    try {
+        if (fs.existsSync(PERSISTENCE_FILE)) {
+            return JSON.parse(fs.readFileSync(PERSISTENCE_FILE, 'utf8'));
+        }
+    } catch (e) {
+        console.error('[PERSIST] Erro ao carregar:', e.message);
+    }
+    return {};
+}
+
+function saveActiveBots(data) {
+    try {
+        fs.writeFileSync(PERSISTENCE_FILE, JSON.stringify(data, null, 2));
+    } catch (e) {
+        console.error('[PERSIST] Erro ao salvar:', e.message);
+    }
+}
+
+function saveBot(email, password, sessions, googleEmail) {
+    const data = loadActiveBots();
+    data[email] = {
+        email,
+        password,
+        sessions,
+        googleEmail: googleEmail || email,
+        started_at: new Date().toISOString()
+    };
+    saveActiveBots(data);
+}
+
+function removeBot(email) {
+    const data = loadActiveBots();
+    delete data[email];
+    saveActiveBots(data);
+}
+
+// ─── Global State ────────────────────────────────────────────────────────────
+const activeBots = new Map(); // email -> BotSession
+const onlineUsers = new Map(); // email -> { sessions, views, earned, since }
 
 // ─── Crypto / Signature ───────────────────────────────────────────────────────
 function sha256hex(data) {
@@ -39,12 +80,10 @@ function signRequest(token, deviceId, timestamp, nonce, body) {
     const payload = `${token}\n${deviceId}\n${timestamp}\n${nonce}\n${bodyHash}`;
     const hmac = crypto.createHmac('sha256', CONFIG.API_SECRET);
     hmac.update(payload, 'utf8');
-    // Base64 URL-safe no padding
     return hmac.digest('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
 function generateDeviceId() {
-    // Real Android device_id = "aid_" + Settings.Secure.ANDROID_ID (16 hex chars)
     return 'aid_' + crypto.randomBytes(8).toString('hex');
 }
 
@@ -52,17 +91,21 @@ function generateDeviceInfo(deviceId) {
     const devices = [
         { manufacturer: 'samsung', model: 'SM-G960N', device: 'starlte', brand: 'samsung' },
         { manufacturer: 'samsung', model: 'SM-A525F', device: 'a52q', brand: 'samsung' },
+        { manufacturer: 'samsung', model: 'SM-A546E', device: 'a54x', brand: 'samsung' },
+        { manufacturer: 'samsung', model: 'SM-G991B', device: 'o1s', brand: 'samsung' },
+        { manufacturer: 'samsung', model: 'SM-G998B', device: 'p3s', brand: 'samsung' },
         { manufacturer: 'xiaomi', model: 'Redmi Note 10', device: 'mojito', brand: 'Redmi' },
-        { manufacturer: 'huawei', model: 'P30 Lite', device: 'marie', brand: 'HUAWEI' },
+        { manufacturer: 'xiaomi', model: 'Redmi Note 12', device: 'tapas', brand: 'xiaomi' },
+        { manufacturer: 'xiaomi', model: 'POCO X5 Pro', device: 'redwood', brand: 'xiaomi' },
         { manufacturer: 'motorola', model: 'moto g(60)', device: 'hanoip', brand: 'motorola' },
-        { manufacturer: 'OnePlus', model: 'IN2025', device: 'OnePlus8T', brand: 'OnePlus' },
-        { manufacturer: 'Google', model: 'Pixel 5', device: 'redfin', brand: 'google' },
-        { manufacturer: 'samsung', model: 'SM-G998B', device: 'o1s', brand: 'samsung' },
+        { manufacturer: 'OnePlus', model: 'CPH2449', device: 'OP5958L1', brand: 'OnePlus' },
+        { manufacturer: 'Google', model: 'Pixel 7', device: 'panther', brand: 'google' },
+        { manufacturer: 'Google', model: 'Pixel 6a', device: 'bluejay', brand: 'google' },
     ];
     const d = devices[Math.floor(Math.random() * devices.length)];
-    const sdks = [28, 29, 30, 31, 33];
+    const sdks = [28, 29, 30, 31, 33, 34];
     const sdk = sdks[Math.floor(Math.random() * sdks.length)];
-    const versions = { 28: '9', 29: '10', 30: '11', 31: '12', 33: '13' };
+    const versions = { 28: '9', 29: '10', 30: '11', 31: '12', 33: '13', 34: '14' };
     return {
         device_id: deviceId,
         manufacturer: d.manufacturer,
@@ -100,12 +143,7 @@ async function apiRequest(endpoint, params, token = '', deviceId = '', accept = 
         'X-ST-Signature': signature,
     };
 
-    const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body,
-    });
-
+    const response = await fetch(url, { method: 'POST', headers, body });
     const text = await response.text();
     if (accept.includes('json')) {
         try { return JSON.parse(text); } catch { return { ok: false, error: text.substring(0, 200) }; }
@@ -115,7 +153,6 @@ async function apiRequest(endpoint, params, token = '', deviceId = '', accept = 
 
 async function apiGetLastSite(token, userId, deviceId, deviceInfo) {
     const url = `${CONFIG.API_BASE}/api_mobile/last_site.php?token=${encodeURIComponent(token)}&user_id=${encodeURIComponent(userId)}`;
-    // CRITICAL: Must include device fields in body (without them server returns "Bad device")
     const params = { token, user_id: String(userId), ...deviceInfo };
     const body = new URLSearchParams(params).toString();
     const timestamp = String(Math.floor(Date.now() / 1000));
@@ -140,7 +177,6 @@ async function apiGetLastSite(token, userId, deviceId, deviceInfo) {
 }
 
 function parseSiteList(html) {
-    // Format: site_id&nbsp;reward&nbsp;seconds&nbsp;url&nbsp;<br>
     const sites = [];
     const lines = html.split('<br>');
     for (const line of lines) {
@@ -157,17 +193,19 @@ function parseSiteList(html) {
     return sites;
 }
 
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // ─── Bot Session Logic ────────────────────────────────────────────────────────
 class BotSession {
-    constructor(socketId, accountIndex, email, password, googleEmail, sessionsCount) {
-        this.id = uuidv4();
-        this.socketId = socketId;
-        this.accountIndex = accountIndex;
+    constructor(email, password, googleEmail, sessionsCount) {
         this.email = email;
         this.password = password;
         this.googleEmail = googleEmail || email;
         this.sessionsCount = sessionsCount || 1;
         this.running = false;
+        this.stopRequested = false;
         this.token = null;
         this.userId = null;
         this.username = null;
@@ -178,10 +216,44 @@ class BotSession {
         this.currentSite = null;
         this.status = 'idle';
         this.startTime = null;
-        this.subSessions = [];
+        this.logs = [];
     }
 
-    async login(emitLog = null, maxRetries = 5) {
+    addLog(msg, level = 'info') {
+        const time = new Date().toLocaleTimeString('pt-BR');
+        this.logs.push({ time, message: msg, level });
+        if (this.logs.length > 500) this.logs = this.logs.slice(-500);
+        // Broadcast to all connected sockets
+        io.emit('log', msg);
+        this.broadcastState();
+    }
+
+    broadcastState() {
+        const userInfo = onlineUsers.get(this.email);
+        if (userInfo) {
+            userInfo.views = this.views;
+            userInfo.earned = this.earned.toFixed(3);
+        }
+        io.emit('online_users', getOnlineUsersData());
+        io.emit('session_update', this.getSessionData());
+        io.emit('stats_update', getGlobalStats());
+    }
+
+    getSessionData() {
+        return {
+            id: this.email,
+            email: this.email,
+            accountIndex: 0,
+            deviceInfo: `${this.deviceInfo.manufacturer} ${this.deviceInfo.model}`,
+            ip: '-',
+            status: this.status,
+            views: this.views,
+            earned: this.earned.toFixed(4),
+            currentSite: this.currentSite ? this.currentSite.substring(0, 50) + '...' : '-',
+        };
+    }
+
+    async login(maxRetries = 10) {
         const params = {
             login: this.email,
             password: this.password,
@@ -192,6 +264,8 @@ class BotSession {
         };
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            if (this.stopRequested) return { success: false, error: 'Stopped by user' };
+
             const result = await apiRequest('/api_mobile/mobile_login.php', params, '', this.deviceId);
             if (result.ok) {
                 this.token = result.token;
@@ -201,26 +275,36 @@ class BotSession {
                 return { success: true, username: result.username, money: result.money };
             }
 
-            // Check for rate limit (retry_after field or "Подождите" message)
+            // Rate limit
             if (result.retry_after || (result.error && result.error.includes('Подождите'))) {
                 let waitSec = result.retry_after || 60;
-                // Parse from error message like "Подождите 1:52 мин."
                 if (!result.retry_after && result.error) {
                     const match = result.error.match(/(\d+):(\d+)/);
                     if (match) {
                         waitSec = parseInt(match[1]) * 60 + parseInt(match[2]) + 5;
                     }
                 }
-                if (emitLog) emitLog(`[${this.email}] ⏳ Rate limit - aguardando ${waitSec}s (tentativa ${attempt}/${maxRetries})...`);
+                this.addLog(`[${this.email}] ⏳ Rate limit - aguardando ${waitSec}s (tentativa ${attempt}/${maxRetries})...`, 'warning');
                 this.status = 'rate_limited';
-                await sleep((waitSec + 2) * 1000);
+                // Wait in small chunks so we can check stopRequested
+                for (let i = 0; i < waitSec + 2; i++) {
+                    if (this.stopRequested) return { success: false, error: 'Stopped by user' };
+                    await sleep(1000);
+                }
                 continue;
             }
 
-            // Other error - no retry
-            return { success: false, error: result.error || 'Login failed' };
+            // Other error - retry with backoff
+            this.addLog(`[${this.email}] ⚠ Login erro (tentativa ${attempt}): ${result.error || 'unknown'}`, 'warning');
+            if (attempt < maxRetries) {
+                const backoff = Math.min(attempt * 5, 30);
+                for (let i = 0; i < backoff; i++) {
+                    if (this.stopRequested) return { success: false, error: 'Stopped by user' };
+                    await sleep(1000);
+                }
+            }
         }
-        return { success: false, error: 'Max retries exceeded (rate limit)' };
+        return { success: false, error: 'Max retries exceeded' };
     }
 
     async ping() {
@@ -267,100 +351,159 @@ class BotSession {
         return await apiRequest('/api_mobile/view_completed.php', params, this.token, this.deviceId);
     }
 
-    async runLoop(subIndex, emitLog) {
+    // ─── Main Loop (runs FOREVER until stopRequested) ─────────────────────────
+    async runLoop(subIndex) {
         let consecutiveEmpty = 0;
-        while (this.running) {
+        let consecutiveErrors = 0;
+
+        while (!this.stopRequested) {
             try {
                 // Fetch available sites
                 const sites = await this.fetchSites();
                 if (!sites || sites.length === 0) {
                     consecutiveEmpty++;
                     if (consecutiveEmpty <= 3 || consecutiveEmpty % 10 === 0) {
-                        emitLog(`[${this.email}#${subIndex}] Sem sites disponíveis (${consecutiveEmpty}x), aguardando ${Math.min(consecutiveEmpty * 5, 30)}s...`);
+                        this.addLog(`[${this.email}#${subIndex}] Sem sites disponíveis (${consecutiveEmpty}x), aguardando...`);
                     }
-                    // Exponential backoff: 5s, 10s, 15s... max 30s
-                    await sleep(Math.min(consecutiveEmpty * 5000, 30000));
+                    this.status = 'waiting';
+                    // Backoff: 10s, 15s, 20s... max 30s
+                    const waitTime = Math.min(10 + consecutiveEmpty * 5, 30);
+                    for (let i = 0; i < waitTime; i++) {
+                        if (this.stopRequested) return;
+                        await sleep(1000);
+                    }
                     continue;
                 }
                 consecutiveEmpty = 0;
+                consecutiveErrors = 0;
 
-                // Pick a random site
+                // Pick a random site from top 10
                 const site = sites[Math.floor(Math.random() * Math.min(sites.length, 10))];
                 this.currentSite = site.url;
                 this.status = 'viewing';
 
-                emitLog(`[${this.email}#${subIndex}] Iniciando view: ${site.url.substring(0, 60)}... (${site.seconds}s, ${site.reward}₽)`);
+                this.addLog(`[${this.email}#${subIndex}] Iniciando view: ${site.url.substring(0, 60)}... (${site.seconds}s, ${site.reward}₽)`);
 
                 // Start view
                 const startResult = await this.viewStarted(site);
                 if (!startResult || !startResult.ok) {
-                    emitLog(`[${this.email}#${subIndex}] Erro ao iniciar view: ${startResult?.error || 'unknown'}`);
-                    await sleep(5000);
+                    const err = startResult?.error || 'unknown';
+                    this.addLog(`[${this.email}#${subIndex}] Erro ao iniciar view: ${err}`, 'error');
+                    
+                    // If token expired, re-login
+                    if (err.includes('token') || err.includes('auth') || err.includes('Авторизуйтесь')) {
+                        this.addLog(`[${this.email}#${subIndex}] Token expirado, fazendo re-login...`, 'warning');
+                        this.status = 'logging_in';
+                        const loginResult = await this.login();
+                        if (!loginResult.success) {
+                            this.addLog(`[${this.email}#${subIndex}] Re-login falhou: ${loginResult.error}`, 'error');
+                            await sleep(30000);
+                        }
+                    } else {
+                        await sleep(5000);
+                    }
                     continue;
                 }
 
                 const viewId = startResult.view_id;
                 const waitTime = (startResult.required_seconds || site.seconds) * 1000 + CONFIG.VIEW_EXTRA_WAIT;
 
-                // Wait for the required time
-                await sleep(waitTime);
+                // Wait for the required time (in 1s chunks to check stopRequested)
+                const waitSecs = Math.ceil(waitTime / 1000);
+                for (let i = 0; i < waitSecs; i++) {
+                    if (this.stopRequested) return;
+                    await sleep(1000);
+                }
 
-                if (!this.running) break;
+                if (this.stopRequested) return;
 
                 // Complete view
                 const completeResult = await this.viewCompleted(site.siteId, viewId);
                 if (completeResult && completeResult.ok) {
                     this.views++;
                     this.earned += parseFloat(site.reward);
-                    emitLog(`[${this.email}#${subIndex}] ✓ View concluída! +${site.reward}₽ (Total: ${this.views} views, ${this.earned.toFixed(4)}₽)`);
+                    this.addLog(`[${this.email}#${subIndex}] ✓ View concluída! +${site.reward}₽ (Total: ${this.views} views, ${this.earned.toFixed(4)}₽)`, 'success');
                 } else {
-                    emitLog(`[${this.email}#${subIndex}] ✗ Erro ao completar: ${completeResult?.error || 'unknown'}`);
+                    this.addLog(`[${this.email}#${subIndex}] ✗ Erro ao completar: ${completeResult?.error || 'unknown'}`, 'error');
                 }
 
                 this.currentSite = null;
                 this.status = 'waiting';
 
-                // Small delay between views
-                await sleep(2000 + Math.random() * 3000);
+                // Small delay between views (1-3s)
+                await sleep(1000 + Math.random() * 2000);
 
             } catch (err) {
-                emitLog(`[${this.email}#${subIndex}] Erro: ${err.message}`);
-                await sleep(10000);
+                consecutiveErrors++;
+                this.addLog(`[${this.email}#${subIndex}] Erro: ${err.message}`, 'error');
+                
+                // If too many consecutive errors, try re-login
+                if (consecutiveErrors >= 5) {
+                    this.addLog(`[${this.email}#${subIndex}] Muitos erros, tentando re-login...`, 'warning');
+                    this.status = 'logging_in';
+                    const loginResult = await this.login();
+                    if (loginResult.success) {
+                        this.addLog(`[${this.email}#${subIndex}] Re-login OK!`, 'success');
+                        consecutiveErrors = 0;
+                    } else {
+                        // Wait longer before retrying
+                        for (let i = 0; i < 60; i++) {
+                            if (this.stopRequested) return;
+                            await sleep(1000);
+                        }
+                    }
+                } else {
+                    await sleep(10000);
+                }
             }
         }
     }
 
-    async start(emitLog) {
+    // ─── Start Bot (runs until user stops) ────────────────────────────────────
+    async start() {
         if (this.running) return;
         this.running = true;
+        this.stopRequested = false;
         this.startTime = new Date();
         this.status = 'logging_in';
 
-        emitLog(`[${this.email}] Fazendo login...`);
-        const loginResult = await this.login(emitLog);
+        this.addLog(`[${this.email}] Fazendo login...`);
+        const loginResult = await this.login();
         if (!loginResult.success) {
-            emitLog(`[${this.email}] ✗ Login falhou: ${loginResult.error}`);
+            this.addLog(`[${this.email}] ✗ Login falhou: ${loginResult.error}`, 'error');
+            if (this.stopRequested) {
+                this.running = false;
+                this.status = 'stopped';
+                return;
+            }
+            // Retry login indefinitely until stopped
+            this.addLog(`[${this.email}] Tentando novamente em 60s...`, 'warning');
+            for (let i = 0; i < 60; i++) {
+                if (this.stopRequested) { this.running = false; this.status = 'stopped'; return; }
+                await sleep(1000);
+            }
+            // Recursive retry
             this.running = false;
-            this.status = 'error';
-            return;
+            return this.start();
         }
-        emitLog(`[${this.email}] ✓ Login OK! User: ${this.username}, Saldo: ${loginResult.money}₽`);
+        this.addLog(`[${this.email}] ✓ Login OK! User: ${this.username}, Saldo: ${loginResult.money}₽`, 'success');
 
-        // Start ping loop
+        // Start ping loop (every 60s)
         this.pingInterval = setInterval(async () => {
-            if (this.running && this.token) {
-                await this.ping();
+            if (!this.stopRequested && this.token) {
+                try { await this.ping(); } catch (e) {}
             }
         }, 60000);
 
-        // Start sub-sessions
+        // Start sub-sessions (all run in parallel, FOREVER)
         for (let i = 0; i < this.sessionsCount; i++) {
-            const subSession = this.runLoop(i + 1, emitLog);
-            this.subSessions.push(subSession);
+            this.runLoop(i + 1); // fire and forget - runs forever
+            await sleep(2000); // stagger start
         }
     }
 
     stop() {
+        this.stopRequested = true;
         this.running = false;
         this.status = 'stopped';
         this.currentSite = null;
@@ -371,112 +514,24 @@ class BotSession {
     }
 }
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+// ─── Helper Functions ────────────────────────────────────────────────────────
+function getOnlineUsersData() {
+    const users = [];
+    let idx = 1;
+    for (const [email, info] of onlineUsers) {
+        users.push({ index: idx++, ...info });
+    }
+    return users;
 }
 
-// ─── Socket.IO ────────────────────────────────────────────────────────────────
-io.on('connection', (socket) => {
-    console.log(`Client connected: ${socket.id}`);
-    const clientSessions = [];
-
-    socket.on('start_all', async (data) => {
-        const { accounts, useProxy } = data;
-        if (!accounts || !Array.isArray(accounts) || accounts.length === 0) {
-            socket.emit('log', 'Nenhuma conta configurada.');
-            return;
-        }
-
-        socket.emit('log', `Iniciando ${accounts.length} conta(s)...`);
-        socket.emit('status_update', { status: 'ONLINE', color: '#0f0' });
-
-        for (const acc of accounts) {
-            if (!acc.email || !acc.password) continue;
-            const session = new BotSession(
-                socket.id,
-                acc.index,
-                acc.email,
-                acc.password,
-                acc.googleEmail || acc.email,
-                acc.sessions || 1
-            );
-            clientSessions.push(session);
-            sessions.set(session.id, session);
-
-            // Track online user
-            onlineUsers.set(session.id, {
-                email: acc.email,
-                sessions: acc.sessions || 1,
-                views: 0,
-                earned: 0,
-                since: new Date().toLocaleTimeString('pt-BR'),
-            });
-
-            session.start((msg) => {
-                socket.emit('log', msg);
-                // Update stats
-                const userInfo = onlineUsers.get(session.id);
-                if (userInfo) {
-                    userInfo.views = session.views;
-                    userInfo.earned = session.earned.toFixed(3);
-                }
-                broadcastOnlineUsers();
-                socket.emit('session_update', getSessionData(session));
-                socket.emit('stats_update', getClientStats(clientSessions));
-            });
-        }
-    });
-
-    socket.on('stop_all', () => {
-        socket.emit('log', 'Parando todas as sessões...');
-        for (const session of clientSessions) {
-            session.stop();
-            sessions.delete(session.id);
-            onlineUsers.delete(session.id);
-        }
-        clientSessions.length = 0;
-        socket.emit('status_update', { status: 'OFFLINE', color: '#f00' });
-        socket.emit('stats_update', { earned: '0.000', views: 0, activeSessions: 0 });
-        broadcastOnlineUsers();
-    });
-
-    socket.on('disconnect', () => {
-        console.log(`Client disconnected: ${socket.id}`);
-        for (const session of clientSessions) {
-            session.stop();
-            sessions.delete(session.id);
-            onlineUsers.delete(session.id);
-        }
-        clientSessions.length = 0;
-        broadcastOnlineUsers();
-    });
-
-    // Send initial online users
-    socket.emit('online_users', getOnlineUsersData());
-});
-
-function getSessionData(session) {
-    return {
-        id: session.id,
-        email: session.email,
-        accountIndex: session.accountIndex,
-        deviceInfo: `${session.deviceInfo.manufacturer} ${session.deviceInfo.model}`,
-        ip: '-',
-        status: session.status,
-        views: session.views,
-        earned: session.earned.toFixed(4),
-        currentSite: session.currentSite ? session.currentSite.substring(0, 50) + '...' : '-',
-    };
-}
-
-function getClientStats(clientSessions) {
+function getGlobalStats() {
     let totalViews = 0;
     let totalEarned = 0;
     let activeSessions = 0;
-    for (const s of clientSessions) {
-        totalViews += s.views;
-        totalEarned += s.earned;
-        if (s.running) activeSessions += s.sessionsCount;
+    for (const [email, bot] of activeBots) {
+        totalViews += bot.views;
+        totalEarned += bot.earned;
+        if (bot.running) activeSessions += bot.sessionsCount;
     }
     return {
         earned: totalEarned.toFixed(3),
@@ -485,18 +540,113 @@ function getClientStats(clientSessions) {
     };
 }
 
-function getOnlineUsersData() {
-    const users = [];
-    let idx = 1;
-    for (const [id, info] of onlineUsers) {
-        users.push({ index: idx++, ...info });
-    }
-    return users;
+function broadcastAll() {
+    io.emit('online_users', getOnlineUsersData());
+    io.emit('stats_update', getGlobalStats());
+    // Send saved accounts to new connections
+    const savedData = loadActiveBots();
+    io.emit('saved_accounts', savedData);
 }
 
-function broadcastOnlineUsers() {
-    io.emit('online_users', getOnlineUsersData());
-}
+// ─── Socket.IO ────────────────────────────────────────────────────────────────
+io.on('connection', (socket) => {
+    console.log(`Client connected: ${socket.id}`);
+
+    // Send current state to new client
+    socket.emit('online_users', getOnlineUsersData());
+    socket.emit('stats_update', getGlobalStats());
+
+    // Send saved accounts for auto-fill
+    const savedData = loadActiveBots();
+    socket.emit('saved_accounts', savedData);
+
+    // Send active session data
+    for (const [email, bot] of activeBots) {
+        socket.emit('session_update', bot.getSessionData());
+    }
+
+    // Send current status
+    if (activeBots.size > 0) {
+        socket.emit('status_update', { status: 'ONLINE', color: '#0f0' });
+    }
+
+    // Send recent logs from active bots
+    for (const [email, bot] of activeBots) {
+        const recentLogs = bot.logs.slice(-50);
+        for (const log of recentLogs) {
+            socket.emit('log', `[${log.time}] ${log.message}`);
+        }
+    }
+
+    socket.on('start_all', async (data) => {
+        const { accounts } = data;
+        if (!accounts || !Array.isArray(accounts) || accounts.length === 0) {
+            socket.emit('log', 'Nenhuma conta configurada.');
+            return;
+        }
+
+        // Stop any currently running bots first
+        for (const [email, bot] of activeBots) {
+            bot.stop();
+            onlineUsers.delete(email);
+        }
+        activeBots.clear();
+
+        socket.emit('log', `Iniciando ${accounts.length} conta(s)...`);
+        socket.emit('status_update', { status: 'ONLINE', color: '#0f0' });
+
+        for (const acc of accounts) {
+            if (!acc.email || !acc.password) continue;
+
+            const bot = new BotSession(
+                acc.email,
+                acc.password,
+                acc.googleEmail || acc.email,
+                acc.sessions || 1
+            );
+
+            activeBots.set(acc.email, bot);
+            onlineUsers.set(acc.email, {
+                email: acc.email,
+                sessions: acc.sessions || 1,
+                views: 0,
+                earned: '0.000',
+                since: new Date().toLocaleTimeString('pt-BR'),
+            });
+
+            // Save credentials for persistence
+            saveBot(acc.email, acc.password, acc.sessions || 1, acc.googleEmail || acc.email);
+
+            // Start bot (runs forever until stopped)
+            bot.start();
+
+            // Stagger between accounts
+            await sleep(3000);
+        }
+
+        broadcastAll();
+    });
+
+    socket.on('stop_all', () => {
+        socket.emit('log', 'Parando todas as sessões...');
+        for (const [email, bot] of activeBots) {
+            bot.stop();
+            removeBot(email);
+            onlineUsers.delete(email);
+        }
+        activeBots.clear();
+        socket.emit('status_update', { status: 'OFFLINE', color: '#f00' });
+        socket.emit('stats_update', { earned: '0.000', views: 0, activeSessions: 0 });
+        socket.emit('sessions_clear');
+        broadcastAll();
+    });
+
+    // Note: We do NOT stop bots on disconnect!
+    // Bots continue running in background even if browser is closed.
+    socket.on('disconnect', () => {
+        console.log(`Client disconnected: ${socket.id} (bots continue running)`);
+    });
+});
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
@@ -507,8 +657,64 @@ app.get('/trap', (req, res) => {
     res.sendFile(path.join(__dirname, 'static', 'admin.html'));
 });
 
-// ─── Start ────────────────────────────────────────────────────────────────────
+// API endpoint to get current status (for admin/monitoring)
+app.get('/api/status', (req, res) => {
+    const status = {};
+    for (const [email, bot] of activeBots) {
+        status[email] = {
+            running: bot.running,
+            status: bot.status,
+            views: bot.views,
+            earned: bot.earned.toFixed(4),
+            sessions: bot.sessionsCount,
+            uptime: bot.startTime ? Math.floor((Date.now() - bot.startTime.getTime()) / 1000) : 0,
+        };
+    }
+    res.json({ activeBots: status, totalBots: activeBots.size });
+});
+
+// ─── Auto-Resume on Startup ──────────────────────────────────────────────────
+function autoResumeBots() {
+    const saved = loadActiveBots();
+    const emails = Object.keys(saved);
+    if (emails.length === 0) {
+        console.log('[AUTO-RESUME] Nenhuma conta salva para resumir.');
+        return;
+    }
+
+    console.log(`[AUTO-RESUME] Resumindo ${emails.length} conta(s)...`);
+
+    for (const email of emails) {
+        const info = saved[email];
+        if (activeBots.has(email)) continue; // already running
+
+        const bot = new BotSession(
+            info.email,
+            info.password,
+            info.googleEmail || info.email,
+            info.sessions || 1
+        );
+
+        activeBots.set(email, bot);
+        onlineUsers.set(email, {
+            email: info.email,
+            sessions: info.sessions || 1,
+            views: 0,
+            earned: '0.000',
+            since: new Date().toLocaleTimeString('pt-BR'),
+        });
+
+        console.log(`[AUTO-RESUME] Iniciando ${email}...`);
+        bot.start();
+    }
+}
+
+// ─── Start Server ────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`SeoTime Bot running on port ${PORT}`);
+    // Auto-resume after 5 seconds (give server time to stabilize)
+    setTimeout(() => {
+        autoResumeBots();
+    }, 5000);
 });
