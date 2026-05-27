@@ -15,14 +15,12 @@
   "author": "",
   "license": "ISC",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "dependencies": {
     "express": "^5.2.1",
     "https-proxy-agent": "^9.0.0",
     "socket.io": "^4.8.3",
-    "socks-proxy-agent": "^10.0.0",
-    "undici": "^8.3.0",
     "uuid": "^14.0.0"
   }
 }

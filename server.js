@@ -5,7 +5,7 @@ const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
-const { ProxyAgent } = require('undici');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const app = express();
 const server = http.createServer(app);
@@ -91,9 +91,9 @@ function buildProxyUrl(proxyConfig, sessionId, rotationId) {
     return `http://${loginWithParams}:${password}@${host}:${port}`;
 }
 
-function createProxyDispatcher(proxyUrl) {
+function createProxyAgent(proxyUrl) {
     if (!proxyUrl) return undefined;
-    return new ProxyAgent(proxyUrl);
+    return new HttpsProxyAgent(proxyUrl);
 }
 
 // ─── Crypto / Signature ───────────────────────────────────────────────────────
@@ -149,7 +149,7 @@ function generateDeviceInfo(deviceId) {
 }
 
 // ─── HTTP Client (with optional proxy) ───────────────────────────────────────
-async function apiRequest(endpoint, params, token = '', deviceId = '', accept = 'application/json', dispatcher = undefined) {
+async function apiRequest(endpoint, params, token = '', deviceId = '', accept = 'application/json', agent = undefined) {
     const url = `${CONFIG.API_BASE}${endpoint}`;
     const body = new URLSearchParams(params).toString();
     const timestamp = String(Math.floor(Date.now() / 1000));
@@ -170,7 +170,7 @@ async function apiRequest(endpoint, params, token = '', deviceId = '', accept = 
     };
 
     const fetchOpts = { method: 'POST', headers, body };
-    if (dispatcher) fetchOpts.dispatcher = dispatcher;
+    if (agent) fetchOpts.agent = agent;
 
     const response = await fetch(url, fetchOpts);
     const text = await response.text();
@@ -180,7 +180,7 @@ async function apiRequest(endpoint, params, token = '', deviceId = '', accept = 
     return text;
 }
 
-async function apiGetLastSite(token, userId, deviceId, deviceInfo, dispatcher = undefined) {
+async function apiGetLastSite(token, userId, deviceId, deviceInfo, agent = undefined) {
     const url = `${CONFIG.API_BASE}/api_mobile/last_site.php?token=${encodeURIComponent(token)}&user_id=${encodeURIComponent(userId)}`;
     const params = { token, user_id: String(userId), ...deviceInfo };
     const body = new URLSearchParams(params).toString();
@@ -202,7 +202,7 @@ async function apiGetLastSite(token, userId, deviceId, deviceInfo, dispatcher = 
     };
 
     const fetchOpts = { method: 'POST', headers, body };
-    if (dispatcher) fetchOpts.dispatcher = dispatcher;
+    if (agent) fetchOpts.agent = agent;
 
     const response = await fetch(url, fetchOpts);
     return await response.text();
@@ -254,7 +254,7 @@ class BotSession {
         this.consecutiveEmpty = 0;
         this.rotationCount = 0;
         this.currentProxyUrl = null;
-        this.dispatcher = null;
+        this.proxyAgent = null;
 
         // Setup initial proxy
         this._setupProxy(1);
@@ -263,10 +263,10 @@ class BotSession {
     _setupProxy(sessionId, rotationId = null) {
         if (this.proxyConfig && this.proxyConfig.enabled) {
             this.currentProxyUrl = buildProxyUrl(this.proxyConfig, sessionId, rotationId);
-            this.dispatcher = createProxyDispatcher(this.currentProxyUrl);
+            this.proxyAgent = createProxyAgent(this.currentProxyUrl);
         } else {
             this.currentProxyUrl = null;
-            this.dispatcher = undefined;
+            this.proxyAgent = undefined;
         }
     }
 
@@ -325,7 +325,7 @@ class BotSession {
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             if (this.stopRequested) return { success: false, error: 'Stopped by user' };
 
-            const result = await apiRequest('/api_mobile/mobile_login.php', params, '', this.deviceId, 'application/json', this.dispatcher);
+            const result = await apiRequest('/api_mobile/mobile_login.php', params, '', this.deviceId, 'application/json', this.proxyAgent);
             if (result.ok) {
                 this.token = result.token;
                 this.userId = result.id;
@@ -377,18 +377,18 @@ class BotSession {
     async ping() {
         if (!this.token) return null;
         const params = { token: this.token, google_email: this.googleEmail, ...this.deviceInfo };
-        return await apiRequest('/api_mobile/ping.php', params, this.token, this.deviceId, 'application/json', this.dispatcher);
+        return await apiRequest('/api_mobile/ping.php', params, this.token, this.deviceId, 'application/json', this.proxyAgent);
     }
 
     async todayStats() {
         if (!this.token) return null;
         const params = { token: this.token, google_email: this.googleEmail, ...this.deviceInfo };
-        return await apiRequest('/api_mobile/today_stats.php', params, this.token, this.deviceId, 'application/json', this.dispatcher);
+        return await apiRequest('/api_mobile/today_stats.php', params, this.token, this.deviceId, 'application/json', this.proxyAgent);
     }
 
     async fetchSites() {
         if (!this.token || !this.userId) return [];
-        const html = await apiGetLastSite(this.token, this.userId, this.deviceId, this.deviceInfo, this.dispatcher);
+        const html = await apiGetLastSite(this.token, this.userId, this.deviceId, this.deviceInfo, this.proxyAgent);
         return parseSiteList(html);
     }
 
@@ -403,7 +403,7 @@ class BotSession {
             url: site.url,
             ...this.deviceInfo
         };
-        return await apiRequest('/api_mobile/view_started.php', params, this.token, this.deviceId, 'application/json', this.dispatcher);
+        return await apiRequest('/api_mobile/view_started.php', params, this.token, this.deviceId, 'application/json', this.proxyAgent);
     }
 
     async viewCompleted(siteId, viewId) {
@@ -415,7 +415,7 @@ class BotSession {
             view_id: String(viewId),
             ...this.deviceInfo
         };
-        return await apiRequest('/api_mobile/view_completed.php', params, this.token, this.deviceId, 'application/json', this.dispatcher);
+        return await apiRequest('/api_mobile/view_completed.php', params, this.token, this.deviceId, 'application/json', this.proxyAgent);
     }
 
     // ─── Main Loop (runs FOREVER until stopRequested) ─────────────────────────
