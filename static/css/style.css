@@ -116,6 +116,7 @@ body {
 }
 
 .account-row input[type="text"],
+.account-row input[type="email"],
 .account-row input[type="password"] {
     flex: 1;
     background: var(--bg-primary);
@@ -221,19 +222,117 @@ body {
     align-items: center;
 }
 
+.proxy-section {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+}
+
 .proxy-toggle {
     display: flex;
     align-items: center;
     gap: 8px;
-    color: var(--text-secondary);
-    font-size: 0.85rem;
-    margin-top: 12px;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    cursor: pointer;
+    margin-bottom: 12px;
 }
 
 .proxy-toggle input[type="checkbox"] {
     accent-color: var(--accent);
-    width: 16px;
-    height: 16px;
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+}
+
+.proxy-fields {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+}
+
+.proxy-row {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+.proxy-row:last-of-type {
+    margin-bottom: 8px;
+}
+
+.proxy-field {
+    flex: 1;
+    min-width: 150px;
+}
+
+.proxy-field-small {
+    flex: 0.5;
+    min-width: 80px;
+}
+
+.proxy-field label {
+    display: block;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.proxy-field input {
+    width: 100%;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    outline: none;
+    transition: border-color 0.3s;
+}
+
+.proxy-field input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 8px var(--accent-glow);
+}
+
+.proxy-info {
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    font-style: italic;
+    margin-top: 4px;
+}
+
+.log-box .log-entry.warning {
+    color: var(--warning);
+}
+
+.status-badge {
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.status-badge.logged_in { background: rgba(0,255,136,0.15); color: var(--success); }
+.status-badge.viewing { background: rgba(0,212,255,0.15); color: var(--accent); }
+.status-badge.waiting { background: rgba(255,170,0,0.15); color: var(--warning); }
+.status-badge.rotating { background: rgba(170,0,255,0.15); color: #aa55ff; }
+.status-badge.logging_in { background: rgba(0,212,255,0.1); color: var(--accent); }
+.status-badge.rate_limited { background: rgba(255,68,68,0.15); color: var(--danger); }
+.status-badge.stopped { background: rgba(255,68,68,0.1); color: var(--text-secondary); }
+
+.site-url {
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
 }
 
 /* Stats Grid */

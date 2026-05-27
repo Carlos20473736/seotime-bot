@@ -5,6 +5,7 @@ const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
+const { ProxyAgent } = require('undici');
 
 const app = express();
 const server = http.createServer(app);
@@ -24,6 +25,9 @@ const CONFIG = {
     MAX_ACCOUNTS: 20,
     POLL_INTERVAL: 30000,
     VIEW_EXTRA_WAIT: 2000,
+    PROXY_PORT: 823,
+    PROXY_COUNTRY: 'br',
+    IP_EXHAUSTED_THRESHOLD: 5,
 };
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
@@ -48,13 +52,14 @@ function saveActiveBots(data) {
     }
 }
 
-function saveBot(email, password, sessions, googleEmail) {
+function saveBot(email, password, sessions, googleEmail, proxyConfig) {
     const data = loadActiveBots();
     data[email] = {
         email,
         password,
         sessions,
         googleEmail: googleEmail || email,
+        proxyConfig: proxyConfig || null,
         started_at: new Date().toISOString()
     };
     saveActiveBots(data);
@@ -69,6 +74,27 @@ function removeBot(email) {
 // ─── Global State ────────────────────────────────────────────────────────────
 const activeBots = new Map(); // email -> BotSession
 const onlineUsers = new Map(); // email -> { sessions, views, earned, since }
+let globalProxyConfig = null; // shared proxy config
+
+// ─── Proxy ───────────────────────────────────────────────────────────────────
+function buildProxyUrl(proxyConfig, sessionId, rotationId) {
+    if (!proxyConfig || !proxyConfig.enabled) return null;
+    const login = proxyConfig.login || '';
+    const password = proxyConfig.password || '';
+    const host = proxyConfig.host || 'gw.dataimpulse.com';
+    const port = proxyConfig.port || CONFIG.PROXY_PORT;
+    const country = proxyConfig.country || CONFIG.PROXY_COUNTRY;
+    if (!login || !password) return null;
+    const rotId = rotationId || (Date.now() % 100000);
+    const sessidValue = `st${sessionId}r${rotId}`;
+    const loginWithParams = `${login}__cr.${country}__sd.${sessidValue}`;
+    return `http://${loginWithParams}:${password}@${host}:${port}`;
+}
+
+function createProxyDispatcher(proxyUrl) {
+    if (!proxyUrl) return undefined;
+    return new ProxyAgent(proxyUrl);
+}
 
 // ─── Crypto / Signature ───────────────────────────────────────────────────────
 function sha256hex(data) {
@@ -122,8 +148,8 @@ function generateDeviceInfo(deviceId) {
     };
 }
 
-// ─── HTTP Client ──────────────────────────────────────────────────────────────
-async function apiRequest(endpoint, params, token = '', deviceId = '', accept = 'application/json') {
+// ─── HTTP Client (with optional proxy) ───────────────────────────────────────
+async function apiRequest(endpoint, params, token = '', deviceId = '', accept = 'application/json', dispatcher = undefined) {
     const url = `${CONFIG.API_BASE}${endpoint}`;
     const body = new URLSearchParams(params).toString();
     const timestamp = String(Math.floor(Date.now() / 1000));
@@ -143,7 +169,10 @@ async function apiRequest(endpoint, params, token = '', deviceId = '', accept = 
         'X-ST-Signature': signature,
     };
 
-    const response = await fetch(url, { method: 'POST', headers, body });
+    const fetchOpts = { method: 'POST', headers, body };
+    if (dispatcher) fetchOpts.dispatcher = dispatcher;
+
+    const response = await fetch(url, fetchOpts);
     const text = await response.text();
     if (accept.includes('json')) {
         try { return JSON.parse(text); } catch { return { ok: false, error: text.substring(0, 200) }; }
@@ -151,7 +180,7 @@ async function apiRequest(endpoint, params, token = '', deviceId = '', accept = 
     return text;
 }
 
-async function apiGetLastSite(token, userId, deviceId, deviceInfo) {
+async function apiGetLastSite(token, userId, deviceId, deviceInfo, dispatcher = undefined) {
     const url = `${CONFIG.API_BASE}/api_mobile/last_site.php?token=${encodeURIComponent(token)}&user_id=${encodeURIComponent(userId)}`;
     const params = { token, user_id: String(userId), ...deviceInfo };
     const body = new URLSearchParams(params).toString();
@@ -172,7 +201,10 @@ async function apiGetLastSite(token, userId, deviceId, deviceInfo) {
         'X-ST-Signature': signature,
     };
 
-    const response = await fetch(url, { method: 'POST', headers, body });
+    const fetchOpts = { method: 'POST', headers, body };
+    if (dispatcher) fetchOpts.dispatcher = dispatcher;
+
+    const response = await fetch(url, fetchOpts);
     return await response.text();
 }
 
@@ -199,11 +231,12 @@ function sleep(ms) {
 
 // ─── Bot Session Logic ────────────────────────────────────────────────────────
 class BotSession {
-    constructor(email, password, googleEmail, sessionsCount) {
+    constructor(email, password, googleEmail, sessionsCount, proxyConfig = null) {
         this.email = email;
         this.password = password;
         this.googleEmail = googleEmail || email;
         this.sessionsCount = sessionsCount || 1;
+        this.proxyConfig = proxyConfig;
         this.running = false;
         this.stopRequested = false;
         this.token = null;
@@ -217,13 +250,37 @@ class BotSession {
         this.status = 'idle';
         this.startTime = null;
         this.logs = [];
+        this.accountBalance = '0.0000';
+        this.consecutiveEmpty = 0;
+        this.rotationCount = 0;
+        this.currentProxyUrl = null;
+        this.dispatcher = null;
+
+        // Setup initial proxy
+        this._setupProxy(1);
+    }
+
+    _setupProxy(sessionId, rotationId = null) {
+        if (this.proxyConfig && this.proxyConfig.enabled) {
+            this.currentProxyUrl = buildProxyUrl(this.proxyConfig, sessionId, rotationId);
+            this.dispatcher = createProxyDispatcher(this.currentProxyUrl);
+        } else {
+            this.currentProxyUrl = null;
+            this.dispatcher = undefined;
+        }
+    }
+
+    _rotateIp(sessionId) {
+        this.rotationCount++;
+        const rotId = Date.now() % 100000 + this.rotationCount;
+        this._setupProxy(sessionId, rotId);
+        return !!this.currentProxyUrl;
     }
 
     addLog(msg, level = 'info') {
         const time = new Date().toLocaleTimeString('pt-BR');
         this.logs.push({ time, message: msg, level });
         if (this.logs.length > 500) this.logs = this.logs.slice(-500);
-        // Broadcast to all connected sockets
         io.emit('log', msg);
         this.broadcastState();
     }
@@ -240,12 +297,13 @@ class BotSession {
     }
 
     getSessionData() {
+        const proxyStr = this.proxyConfig && this.proxyConfig.enabled ? ' [PROXY]' : '';
         return {
             id: this.email,
             email: this.email,
             accountIndex: 0,
-            deviceInfo: `${this.deviceInfo.manufacturer} ${this.deviceInfo.model}`,
-            ip: '-',
+            deviceInfo: `${this.deviceInfo.manufacturer} ${this.deviceInfo.model}${proxyStr}`,
+            ip: this.proxyConfig && this.proxyConfig.enabled ? `proxy (rot: ${this.rotationCount})` : '-',
             status: this.status,
             views: this.views,
             earned: this.earned.toFixed(4),
@@ -267,7 +325,7 @@ class BotSession {
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             if (this.stopRequested) return { success: false, error: 'Stopped by user' };
 
-            const result = await apiRequest('/api_mobile/mobile_login.php', params, '', this.deviceId);
+            const result = await apiRequest('/api_mobile/mobile_login.php', params, '', this.deviceId, 'application/json', this.dispatcher);
             if (result.ok) {
                 this.token = result.token;
                 this.userId = result.id;
@@ -287,10 +345,14 @@ class BotSession {
                 }
                 this.addLog(`[${this.email}] ⏳ Rate limit - aguardando ${waitSec}s (tentativa ${attempt}/${maxRetries})...`, 'warning');
                 this.status = 'rate_limited';
-                // Wait in small chunks so we can check stopRequested
                 for (let i = 0; i < waitSec + 2; i++) {
                     if (this.stopRequested) return { success: false, error: 'Stopped by user' };
                     await sleep(1000);
+                }
+                // Rotate IP on rate limit if proxy enabled
+                if (this.proxyConfig && this.proxyConfig.enabled) {
+                    this._rotateIp(1);
+                    this.addLog(`[${this.email}] 🔄 IP rotacionado (tentativa ${attempt})`, 'warning');
                 }
                 continue;
             }
@@ -298,6 +360,10 @@ class BotSession {
             // Other error - retry with backoff
             this.addLog(`[${this.email}] ⚠ Login erro (tentativa ${attempt}): ${result.error || 'unknown'}`, 'warning');
             if (attempt < maxRetries) {
+                // Rotate IP on error if proxy enabled
+                if (this.proxyConfig && this.proxyConfig.enabled) {
+                    this._rotateIp(1);
+                }
                 const backoff = Math.min(attempt * 5, 30);
                 for (let i = 0; i < backoff; i++) {
                     if (this.stopRequested) return { success: false, error: 'Stopped by user' };
@@ -311,18 +377,18 @@ class BotSession {
     async ping() {
         if (!this.token) return null;
         const params = { token: this.token, google_email: this.googleEmail, ...this.deviceInfo };
-        return await apiRequest('/api_mobile/ping.php', params, this.token, this.deviceId);
+        return await apiRequest('/api_mobile/ping.php', params, this.token, this.deviceId, 'application/json', this.dispatcher);
     }
 
     async todayStats() {
         if (!this.token) return null;
         const params = { token: this.token, google_email: this.googleEmail, ...this.deviceInfo };
-        return await apiRequest('/api_mobile/today_stats.php', params, this.token, this.deviceId);
+        return await apiRequest('/api_mobile/today_stats.php', params, this.token, this.deviceId, 'application/json', this.dispatcher);
     }
 
     async fetchSites() {
         if (!this.token || !this.userId) return [];
-        const html = await apiGetLastSite(this.token, this.userId, this.deviceId, this.deviceInfo);
+        const html = await apiGetLastSite(this.token, this.userId, this.deviceId, this.deviceInfo, this.dispatcher);
         return parseSiteList(html);
     }
 
@@ -337,7 +403,7 @@ class BotSession {
             url: site.url,
             ...this.deviceInfo
         };
-        return await apiRequest('/api_mobile/view_started.php', params, this.token, this.deviceId);
+        return await apiRequest('/api_mobile/view_started.php', params, this.token, this.deviceId, 'application/json', this.dispatcher);
     }
 
     async viewCompleted(siteId, viewId) {
@@ -349,7 +415,7 @@ class BotSession {
             view_id: String(viewId),
             ...this.deviceInfo
         };
-        return await apiRequest('/api_mobile/view_completed.php', params, this.token, this.deviceId);
+        return await apiRequest('/api_mobile/view_completed.php', params, this.token, this.deviceId, 'application/json', this.dispatcher);
     }
 
     // ─── Main Loop (runs FOREVER until stopRequested) ─────────────────────────
@@ -363,11 +429,24 @@ class BotSession {
                 const sites = await this.fetchSites();
                 if (!sites || sites.length === 0) {
                     consecutiveEmpty++;
+                    this.consecutiveEmpty = consecutiveEmpty;
+
+                    // IP exhausted - rotate if proxy enabled
+                    if (consecutiveEmpty >= CONFIG.IP_EXHAUSTED_THRESHOLD && this.proxyConfig && this.proxyConfig.enabled) {
+                        this.addLog(`[${this.email}#${subIndex}] 🔄 IP esgotado (${consecutiveEmpty}x sem sites), rotacionando...`, 'warning');
+                        this.status = 'rotating';
+                        this._rotateIp(subIndex);
+                        consecutiveEmpty = 0;
+                        this.consecutiveEmpty = 0;
+                        this.addLog(`[${this.email}#${subIndex}] ✓ Novo IP ativo (rotação #${this.rotationCount})`, 'info');
+                        await sleep(3000);
+                        continue;
+                    }
+
                     if (consecutiveEmpty <= 3 || consecutiveEmpty % 10 === 0) {
                         this.addLog(`[${this.email}#${subIndex}] Sem sites disponíveis (${consecutiveEmpty}x), aguardando...`);
                     }
                     this.status = 'waiting';
-                    // Backoff: 10s, 15s, 20s... max 30s
                     const waitTime = Math.min(10 + consecutiveEmpty * 5, 30);
                     for (let i = 0; i < waitTime; i++) {
                         if (this.stopRequested) return;
@@ -376,6 +455,7 @@ class BotSession {
                     continue;
                 }
                 consecutiveEmpty = 0;
+                this.consecutiveEmpty = 0;
                 consecutiveErrors = 0;
 
                 // Pick a random site from top 10
@@ -391,7 +471,6 @@ class BotSession {
                     const err = startResult?.error || 'unknown';
                     this.addLog(`[${this.email}#${subIndex}] Erro ao iniciar view: ${err}`, 'error');
                     
-                    // If token expired, re-login
                     if (err.includes('token') || err.includes('auth') || err.includes('Авторизуйтесь')) {
                         this.addLog(`[${this.email}#${subIndex}] Token expirado, fazendo re-login...`, 'warning');
                         this.status = 'logging_in';
@@ -409,7 +488,6 @@ class BotSession {
                 const viewId = startResult.view_id;
                 const waitTime = (startResult.required_seconds || site.seconds) * 1000 + CONFIG.VIEW_EXTRA_WAIT;
 
-                // Wait for the required time (in 1s chunks to check stopRequested)
                 const waitSecs = Math.ceil(waitTime / 1000);
                 for (let i = 0; i < waitSecs; i++) {
                     if (this.stopRequested) return;
@@ -423,7 +501,7 @@ class BotSession {
                 if (completeResult && completeResult.ok) {
                     this.views++;
                     this.earned += parseFloat(site.reward);
-                    // Update balance from ping
+                    // Update balance
                     let balanceStr = '';
                     try {
                         const stats = await this.todayStats();
@@ -443,24 +521,25 @@ class BotSession {
 
                 this.currentSite = null;
                 this.status = 'waiting';
-
-                // Small delay between views (1-3s)
                 await sleep(1000 + Math.random() * 2000);
 
             } catch (err) {
                 consecutiveErrors++;
                 this.addLog(`[${this.email}#${subIndex}] Erro: ${err.message}`, 'error');
                 
-                // If too many consecutive errors, try re-login
                 if (consecutiveErrors >= 5) {
                     this.addLog(`[${this.email}#${subIndex}] Muitos erros, tentando re-login...`, 'warning');
+                    // Rotate IP on persistent errors
+                    if (this.proxyConfig && this.proxyConfig.enabled) {
+                        this._rotateIp(subIndex);
+                        this.addLog(`[${this.email}#${subIndex}] 🔄 IP rotacionado após erros`, 'warning');
+                    }
                     this.status = 'logging_in';
                     const loginResult = await this.login();
                     if (loginResult.success) {
                         this.addLog(`[${this.email}#${subIndex}] Re-login OK!`, 'success');
                         consecutiveErrors = 0;
                     } else {
-                        // Wait longer before retrying
                         for (let i = 0; i < 60; i++) {
                             if (this.stopRequested) return;
                             await sleep(1000);
@@ -481,7 +560,11 @@ class BotSession {
         this.startTime = new Date();
         this.status = 'logging_in';
 
-        this.addLog(`[${this.email}] Fazendo login...`);
+        const proxyStatus = this.proxyConfig && this.proxyConfig.enabled
+            ? `COM PROXY (${this.proxyConfig.host}:${this.proxyConfig.port}, ${CONFIG.PROXY_COUNTRY.toUpperCase()})`
+            : 'SEM PROXY';
+        this.addLog(`[${this.email}] Fazendo login... (${proxyStatus})`);
+
         const loginResult = await this.login();
         if (!loginResult.success) {
             this.addLog(`[${this.email}] ✗ Login falhou: ${loginResult.error}`, 'error');
@@ -490,13 +573,11 @@ class BotSession {
                 this.status = 'stopped';
                 return;
             }
-            // Retry login indefinitely until stopped
             this.addLog(`[${this.email}] Tentando novamente em 60s...`, 'warning');
             for (let i = 0; i < 60; i++) {
                 if (this.stopRequested) { this.running = false; this.status = 'stopped'; return; }
                 await sleep(1000);
             }
-            // Recursive retry
             this.running = false;
             return this.start();
         }
@@ -517,8 +598,8 @@ class BotSession {
 
         // Start sub-sessions (all run in parallel, FOREVER)
         for (let i = 0; i < this.sessionsCount; i++) {
-            this.runLoop(i + 1); // fire and forget - runs forever
-            await sleep(2000); // stagger start
+            this.runLoop(i + 1);
+            await sleep(2000);
         }
     }
 
@@ -563,7 +644,6 @@ function getGlobalStats() {
 function broadcastAll() {
     io.emit('online_users', getOnlineUsersData());
     io.emit('stats_update', getGlobalStats());
-    // Send saved accounts to new connections
     const savedData = loadActiveBots();
     io.emit('saved_accounts', savedData);
 }
@@ -579,6 +659,9 @@ io.on('connection', (socket) => {
     // Send saved accounts for auto-fill
     const savedData = loadActiveBots();
     socket.emit('saved_accounts', savedData);
+
+    // Send proxy config
+    socket.emit('proxy_config', globalProxyConfig);
 
     // Send active session data
     for (const [email, bot] of activeBots) {
@@ -599,11 +682,14 @@ io.on('connection', (socket) => {
     }
 
     socket.on('start_all', async (data) => {
-        const { accounts } = data;
+        const { accounts, proxyConfig } = data;
         if (!accounts || !Array.isArray(accounts) || accounts.length === 0) {
             socket.emit('log', 'Nenhuma conta configurada.');
             return;
         }
+
+        // Save proxy config globally
+        globalProxyConfig = proxyConfig || null;
 
         // Stop any currently running bots first
         for (const [email, bot] of activeBots) {
@@ -612,7 +698,10 @@ io.on('connection', (socket) => {
         }
         activeBots.clear();
 
-        socket.emit('log', `Iniciando ${accounts.length} conta(s)...`);
+        const proxyStr = proxyConfig && proxyConfig.enabled
+            ? ` (COM PROXY: ${proxyConfig.host}:${proxyConfig.port})`
+            : ' (SEM PROXY)';
+        socket.emit('log', `Iniciando ${accounts.length} conta(s)...${proxyStr}`);
         socket.emit('status_update', { status: 'ONLINE', color: '#0f0' });
 
         for (const acc of accounts) {
@@ -622,7 +711,8 @@ io.on('connection', (socket) => {
                 acc.email,
                 acc.password,
                 acc.googleEmail || acc.email,
-                acc.sessions || 1
+                acc.sessions || 1,
+                proxyConfig || null
             );
 
             activeBots.set(acc.email, bot);
@@ -634,8 +724,8 @@ io.on('connection', (socket) => {
                 since: new Date().toLocaleTimeString('pt-BR'),
             });
 
-            // Save credentials for persistence
-            saveBot(acc.email, acc.password, acc.sessions || 1, acc.googleEmail || acc.email);
+            // Save credentials + proxy config for persistence
+            saveBot(acc.email, acc.password, acc.sessions || 1, acc.googleEmail || acc.email, proxyConfig);
 
             // Start bot (runs forever until stopped)
             bot.start();
@@ -662,7 +752,6 @@ io.on('connection', (socket) => {
     });
 
     // Note: We do NOT stop bots on disconnect!
-    // Bots continue running in background even if browser is closed.
     socket.on('disconnect', () => {
         console.log(`Client disconnected: ${socket.id} (bots continue running)`);
     });
@@ -677,7 +766,6 @@ app.get('/trap', (req, res) => {
     res.sendFile(path.join(__dirname, 'static', 'admin.html'));
 });
 
-// API endpoint to get current status (for admin/monitoring)
 app.get('/api/status', (req, res) => {
     const status = {};
     for (const [email, bot] of activeBots) {
@@ -687,6 +775,8 @@ app.get('/api/status', (req, res) => {
             views: bot.views,
             earned: bot.earned.toFixed(4),
             sessions: bot.sessionsCount,
+            proxy: bot.proxyConfig && bot.proxyConfig.enabled ? 'enabled' : 'disabled',
+            rotations: bot.rotationCount,
             uptime: bot.startTime ? Math.floor((Date.now() - bot.startTime.getTime()) / 1000) : 0,
         };
     }
@@ -706,14 +796,20 @@ function autoResumeBots() {
 
     for (const email of emails) {
         const info = saved[email];
-        if (activeBots.has(email)) continue; // already running
+        if (activeBots.has(email)) continue;
 
         const bot = new BotSession(
             info.email,
             info.password,
             info.googleEmail || info.email,
-            info.sessions || 1
+            info.sessions || 1,
+            info.proxyConfig || null
         );
+
+        // Restore global proxy config from first saved bot
+        if (info.proxyConfig && !globalProxyConfig) {
+            globalProxyConfig = info.proxyConfig;
+        }
 
         activeBots.set(email, bot);
         onlineUsers.set(email, {
@@ -733,7 +829,6 @@ function autoResumeBots() {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`SeoTime Bot running on port ${PORT}`);
-    // Auto-resume after 5 seconds (give server time to stabilize)
     setTimeout(() => {
         autoResumeBots();
     }, 5000);

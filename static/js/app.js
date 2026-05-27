@@ -1,76 +1,90 @@
-// SeoTime Bot - Frontend
 const socket = io();
-let accountCount = 0;
-const MAX_ACCOUNTS = 20;
 
-// ─── Account Management ───────────────────────────────────────────────────────
-function addAccountRow(email = '', password = '', sessions = 1) {
-    if (accountCount >= MAX_ACCOUNTS) return;
+// ─── Account Management ──────────────────────────────────────────────────────
+let accountCount = 0;
+
+function addAccount(email = '', password = '', sessions = 1, googleEmail = '') {
+    if (accountCount >= 20) return;
     accountCount++;
-    updateAccountCount();
+    document.getElementById('account_count').textContent = accountCount;
+    document.getElementById('add_count').textContent = accountCount;
 
     const container = document.getElementById('accounts_container');
     const row = document.createElement('div');
     row.className = 'account-row';
-    row.dataset.index = accountCount - 1;
+    row.id = `account_row_${accountCount}`;
     row.innerHTML = `
-        <span class="num">${accountCount}</span>
-        <input type="text" placeholder="Email / Login" class="acc-email" value="${email}">
-        <input type="password" placeholder="Senha" class="acc-password" value="${password}">
-        <input type="number" value="${sessions}" min="1" max="15" class="acc-sessions" title="Sessões simultâneas">
-        <span class="label-sess">sess.</span>
-        <button class="btn-remove" onclick="removeAccount(this)" title="Remover conta">✕</button>
+        <input type="email" placeholder="Email" value="${email}" class="acc-email">
+        <input type="password" placeholder="Senha" value="${password}" class="acc-pass">
+        <input type="number" placeholder="Sessões" value="${sessions}" min="1" max="5" class="acc-sessions">
+        <button class="btn btn-remove" onclick="removeAccount(this)">✕</button>
     `;
     container.appendChild(row);
 }
 
-function addAccount() {
-    addAccountRow();
-}
-
 function removeAccount(btn) {
-    const row = btn.closest('.account-row');
-    const container = document.getElementById('accounts_container');
-    if (container.children.length <= 1) return;
+    const row = btn.parentElement;
     row.remove();
     accountCount--;
-    updateAccountCount();
-    // Re-number
-    const rows = container.querySelectorAll('.account-row');
-    rows.forEach((r, i) => {
-        r.querySelector('.num').textContent = i + 1;
-        r.dataset.index = i;
-    });
-}
-
-function updateAccountCount() {
     document.getElementById('account_count').textContent = accountCount;
     document.getElementById('add_count').textContent = accountCount;
 }
 
-function getAccounts() {
-    const accounts = [];
-    const rows = document.querySelectorAll('.account-row');
-    rows.forEach((row, index) => {
-        const email = row.querySelector('.acc-email').value.trim();
-        const password = row.querySelector('.acc-password').value.trim();
-        const sessions = parseInt(row.querySelector('.acc-sessions').value) || 1;
-        if (email && password) {
-            accounts.push({ index, email, password, googleEmail: email, sessions });
-        }
-    });
-    return accounts;
+// ─── Proxy Toggle ────────────────────────────────────────────────────────────
+function toggleProxyFields() {
+    const enabled = document.getElementById('proxy_enabled').checked;
+    document.getElementById('proxy_fields').style.display = enabled ? 'block' : 'none';
 }
 
-// ─── Controls ─────────────────────────────────────────────────────────────────
-function startAll() {
-    const accounts = getAccounts();
-    if (accounts.length === 0) {
-        addLog('⚠ Adicione pelo menos uma conta com email e senha.', 'error');
+function getProxyConfig() {
+    const enabled = document.getElementById('proxy_enabled').checked;
+    if (!enabled) return null;
+    return {
+        enabled: true,
+        login: document.getElementById('proxy_login').value.trim(),
+        password: document.getElementById('proxy_password').value.trim(),
+        host: document.getElementById('proxy_host').value.trim() || 'gw.dataimpulse.com',
+        port: parseInt(document.getElementById('proxy_port').value) || 823,
+        country: document.getElementById('proxy_country').value.trim() || 'br',
+    };
+}
+
+function setProxyConfig(config) {
+    if (!config || !config.enabled) {
+        document.getElementById('proxy_enabled').checked = false;
+        document.getElementById('proxy_fields').style.display = 'none';
         return;
     }
-    const useProxy = document.getElementById('proxy_enabled').checked;
-    socket.emit('start_all', { accounts, useProxy });
+    document.getElementById('proxy_enabled').checked = true;
+    document.getElementById('proxy_fields').style.display = 'block';
+    document.getElementById('proxy_login').value = config.login || '';
+    document.getElementById('proxy_password').value = config.password || '';
+    document.getElementById('proxy_host').value = config.host || 'gw.dataimpulse.com';
+    document.getElementById('proxy_port').value = config.port || 823;
+    document.getElementById('proxy_country').value = config.country || 'br';
+}
+
+// ─── Controls ────────────────────────────────────────────────────────────────
+function startAll() {
+    const rows = document.querySelectorAll('.account-row');
+    const accounts = [];
+    rows.forEach(row => {
+        const email = row.querySelector('.acc-email').value.trim();
+        const password = row.querySelector('.acc-pass').value.trim();
+        const sessions = parseInt(row.querySelector('.acc-sessions').value) || 1;
+        if (email && password) {
+            accounts.push({ email, password, sessions, googleEmail: email });
+        }
+    });
+
+    if (accounts.length === 0) {
+        addLog('Adicione pelo menos uma conta antes de iniciar.', 'error');
+        return;
+    }
+
+    const proxyConfig = getProxyConfig();
+
+    socket.emit('start_all', { accounts, proxyConfig });
     document.getElementById('btn_start').disabled = true;
     document.getElementById('btn_start').style.opacity = '0.5';
 }
@@ -86,81 +100,75 @@ function stopAll() {
 function addLog(message, type = '') {
     const logBox = document.getElementById('log_box');
     const entry = document.createElement('div');
-    entry.className = 'log-entry ' + type;
-    // If message already has timestamp, use as-is
-    if (message.startsWith('[')) {
-        entry.textContent = message;
-    } else {
-        const time = new Date().toLocaleTimeString('pt-BR');
-        entry.textContent = `[${time}] ${message}`;
-    }
+    entry.className = `log-entry ${type}`;
+    const time = new Date().toLocaleTimeString('pt-BR');
+    entry.textContent = message.startsWith('[') ? message : `[${time}] ${message}`;
     logBox.appendChild(entry);
     logBox.scrollTop = logBox.scrollHeight;
 
-    // Keep max 300 entries
-    while (logBox.children.length > 300) {
+    // Keep max 200 entries
+    while (logBox.children.length > 200) {
         logBox.removeChild(logBox.firstChild);
     }
 }
 
-// ─── Socket Events ────────────────────────────────────────────────────────────
+// ─── Socket Events ───────────────────────────────────────────────────────────
+socket.on('connect', () => {
+    addLog('Conectado ao servidor.', 'success');
+});
+
+socket.on('disconnect', () => {
+    addLog('Desconectado do servidor.', 'error');
+});
+
 socket.on('log', (msg) => {
     let type = '';
-    if (msg.includes('✓') || msg.includes('concluída') || msg.includes('Login OK')) type = 'success';
-    else if (msg.includes('✗') || msg.includes('Erro') || msg.includes('falhou')) type = 'error';
-    else if (msg.includes('Iniciando') || msg.includes('⏳') || msg.includes('aguardando')) type = 'warning';
-    else if (msg.includes('Conectado') || msg.includes('Fazendo')) type = 'info';
+    if (msg.includes('✓') || msg.includes('Login OK') || msg.includes('concluída')) type = 'success';
+    else if (msg.includes('✗') || msg.includes('falhou') || msg.includes('Erro')) type = 'error';
+    else if (msg.includes('⏳') || msg.includes('⚠') || msg.includes('🔄') || msg.includes('aguardando')) type = 'warning';
     addLog(msg, type);
 });
 
 socket.on('status_update', (data) => {
-    const dot = document.getElementById('status_dot');
-    const text = document.getElementById('status_text');
-    text.textContent = data.status;
+    document.getElementById('status_text').textContent = data.status;
+    document.getElementById('status_dot').style.background = data.color;
     if (data.status === 'ONLINE') {
-        dot.classList.add('online');
         document.getElementById('btn_start').disabled = true;
         document.getElementById('btn_start').style.opacity = '0.5';
     } else {
-        dot.classList.remove('online');
         document.getElementById('btn_start').disabled = false;
         document.getElementById('btn_start').style.opacity = '1';
     }
 });
 
 socket.on('stats_update', (data) => {
-    document.getElementById('stat_earned').textContent = data.earned + ' ₽';
+    document.getElementById('stat_earned').textContent = `${data.earned} ₽`;
     document.getElementById('stat_views').textContent = data.views;
     document.getElementById('stat_sessions').textContent = data.activeSessions;
 });
 
-socket.on('session_update', (data) => {
-    const tbody = document.getElementById('sessions_table');
-    const emptyRow = tbody.querySelector('.empty-row');
+socket.on('session_update', (session) => {
+    const table = document.getElementById('sessions_table');
+    // Remove empty row
+    const emptyRow = table.querySelector('.empty-row');
     if (emptyRow) emptyRow.remove();
 
-    let row = document.getElementById('session_' + data.id);
+    let row = document.getElementById(`session_${session.id}`);
     if (!row) {
         row = document.createElement('tr');
-        row.id = 'session_' + data.id;
-        tbody.appendChild(row);
+        row.id = `session_${session.id}`;
+        table.appendChild(row);
     }
-
-    const statusColor = data.status === 'viewing' ? 'var(--success)' :
-                        data.status === 'error' || data.status === 'stopped' ? 'var(--danger)' :
-                        data.status === 'waiting' || data.status === 'rate_limited' ? 'var(--warning)' :
-                        data.status === 'logged_in' ? 'var(--success)' : 'var(--text-secondary)';
-
     row.innerHTML = `
-        <td>${data.email}</td>
-        <td>${data.accountIndex + 1}</td>
-        <td>${data.deviceInfo}</td>
-        <td>${data.ip}</td>
-        <td style="color: ${statusColor}">${data.status}</td>
-        <td>${data.views}</td>
-        <td>${data.earned} ₽</td>
-        <td class="balance">${data.balance || '0.0000'} ₽</td>
-        <td title="${data.currentSite}">${data.currentSite}</td>
+        <td>${session.email}</td>
+        <td>${session.accountIndex + 1}</td>
+        <td>${session.deviceInfo}</td>
+        <td>${session.ip}</td>
+        <td><span class="status-badge ${session.status}">${session.status}</span></td>
+        <td>${session.views}</td>
+        <td>${session.earned} ₽</td>
+        <td>${session.balance} ₽</td>
+        <td class="site-url">${session.currentSite}</td>
     `;
 });
 
@@ -170,12 +178,12 @@ socket.on('sessions_clear', () => {
 
 socket.on('online_users', (users) => {
     document.getElementById('online_count').textContent = users.length;
-    const tbody = document.getElementById('online_table');
+    const table = document.getElementById('online_table');
     if (users.length === 0) {
-        tbody.innerHTML = '<tr class="empty-row"><td colspan="6">Nenhum usuário online</td></tr>';
+        table.innerHTML = '<tr class="empty-row"><td colspan="6">Nenhum usuário online</td></tr>';
         return;
     }
-    tbody.innerHTML = users.map(u => `
+    table.innerHTML = users.map(u => `
         <tr>
             <td>${u.index}</td>
             <td>${u.email}</td>
@@ -187,35 +195,39 @@ socket.on('online_users', (users) => {
     `).join('');
 });
 
-// ─── Saved Accounts (auto-fill from server persistence) ──────────────────────
+// ─── Saved Accounts (auto-fill from persistence) ─────────────────────────────
 socket.on('saved_accounts', (data) => {
-    const emails = Object.keys(data);
-    if (emails.length === 0 && accountCount === 0) {
+    if (!data || Object.keys(data).length === 0) {
         // No saved accounts, add one empty row
-        addAccountRow();
+        if (accountCount === 0) addAccount();
         return;
     }
-    if (emails.length > 0 && accountCount === 0) {
-        // Fill from saved data
-        const container = document.getElementById('accounts_container');
-        container.innerHTML = '';
-        accountCount = 0;
-        for (const email of emails) {
-            const info = data[email];
-            addAccountRow(info.email, info.password, info.sessions || 1);
-        }
+
+    // Clear existing rows and rebuild from saved data
+    document.getElementById('accounts_container').innerHTML = '';
+    accountCount = 0;
+
+    for (const email of Object.keys(data)) {
+        const info = data[email];
+        addAccount(info.email, info.password, info.sessions || 1, info.googleEmail || '');
+    }
+
+    // Restore proxy config from first saved account
+    const firstKey = Object.keys(data)[0];
+    if (data[firstKey] && data[firstKey].proxyConfig) {
+        setProxyConfig(data[firstKey].proxyConfig);
     }
 });
 
-socket.on('connect', () => {
-    addLog('Conectado ao servidor.', 'info');
+// ─── Proxy Config from server ────────────────────────────────────────────────
+socket.on('proxy_config', (config) => {
+    if (config) {
+        setProxyConfig(config);
+    }
 });
 
-socket.on('disconnect', () => {
-    addLog('Desconectado do servidor. (Bots continuam rodando no servidor)', 'error');
-    document.getElementById('status_dot').classList.remove('online');
-    document.getElementById('status_text').textContent = 'DESCONECTADO';
-});
-
-// ─── Initialize ──────────────────────────────────────────────────────────────
-// Don't add empty row on load - wait for saved_accounts event
+// ─── Init ────────────────────────────────────────────────────────────────────
+// Add one empty account row if none exist after load
+setTimeout(() => {
+    if (accountCount === 0) addAccount();
+}, 1000);

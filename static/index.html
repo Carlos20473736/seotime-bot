@@ -13,7 +13,7 @@
             <h1>SEOTIME BOT</h1>
             <img src="/static/img/logo_bot.png" alt="Bot" onerror="this.style.display='none'">
         </div>
-        <div class="subtitle">Multi-Session Automation System v2.0.0 | Auto-Resume Enabled</div>
+        <div class="subtitle">Multi-Session Automation System v2.1.0 | Auto-Resume + Proxy</div>
     </div>
 
     <div class="container">
@@ -23,7 +23,6 @@
             <div class="account-info">
                 Adicione até 20 contas. As credenciais são <strong>salvas automaticamente</strong> no servidor.
                 O bot roda <strong>infinitamente</strong> até você clicar PARAR. Mesmo se fechar o navegador, o bot continua rodando.
-                Ao reiniciar o servidor, as contas são restauradas automaticamente.
             </div>
             <div class="account-info">Contas: <span id="account_count">0</span>/20</div>
 
@@ -35,10 +34,42 @@
                 + ADICIONAR CONTA (<span id="add_count">0</span>/20)
             </button>
 
-            <label class="proxy-toggle">
-                <input type="checkbox" id="proxy_enabled">
-                🌐 USAR PROXY (DataImpulse)
-            </label>
+            <!-- Proxy Configuration -->
+            <div class="proxy-section">
+                <label class="proxy-toggle">
+                    <input type="checkbox" id="proxy_enabled" onchange="toggleProxyFields()">
+                    🌐 USAR PROXY (DataImpulse)
+                </label>
+                <div class="proxy-fields" id="proxy_fields" style="display:none;">
+                    <div class="proxy-row">
+                        <div class="proxy-field">
+                            <label>Login:</label>
+                            <input type="text" id="proxy_login" placeholder="4abaa365271757d125b0">
+                        </div>
+                        <div class="proxy-field">
+                            <label>Senha:</label>
+                            <input type="text" id="proxy_password" placeholder="f5d94bffa4ae60a8">
+                        </div>
+                    </div>
+                    <div class="proxy-row">
+                        <div class="proxy-field">
+                            <label>Host:</label>
+                            <input type="text" id="proxy_host" value="gw.dataimpulse.com" placeholder="gw.dataimpulse.com">
+                        </div>
+                        <div class="proxy-field proxy-field-small">
+                            <label>Porta:</label>
+                            <input type="number" id="proxy_port" value="823" placeholder="823">
+                        </div>
+                        <div class="proxy-field proxy-field-small">
+                            <label>País:</label>
+                            <input type="text" id="proxy_country" value="br" placeholder="br">
+                        </div>
+                    </div>
+                    <div class="proxy-info">
+                        Rotação automática de IP quando não há sites disponíveis (após 5 tentativas vazias).
+                    </div>
+                </div>
+            </div>
 
             <div class="controls">
                 <button class="btn btn-start" id="btn_start" onclick="startAll()">▶ INICIAR TODAS</button>
@@ -99,7 +130,6 @@
             <div class="card-title">📋 LOGS</div>
             <div class="log-box" id="log_box">
                 <div class="log-entry info">Sistema pronto. Adicione suas contas e clique INICIAR TODAS.</div>
-                <div class="log-entry info">As contas são salvas automaticamente. O bot roda até você parar.</div>
             </div>
         </div>
 
@@ -130,7 +160,7 @@
     </div>
 
     <div class="footer">
-        SeoTime Multi-Bot v2.0 &copy; 2026 | Auto-Resume + Persistência | Roda infinitamente até parar
+        SeoTime Multi-Bot v2.1 &copy; 2026 | Auto-Resume + Proxy DataImpulse | Roda infinitamente até parar
         <a href="/trap">admin panel</a>
     </div>
 
