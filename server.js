@@ -44,7 +44,8 @@ function signRequest(token, deviceId, timestamp, nonce, body) {
 }
 
 function generateDeviceId() {
-    return 'aid_' + crypto.randomBytes(6).toString('hex');
+    // Real Android device_id = "aid_" + Settings.Secure.ANDROID_ID (16 hex chars)
+    return 'aid_' + crypto.randomBytes(8).toString('hex');
 }
 
 function generateDeviceInfo(deviceId) {
@@ -112,9 +113,10 @@ async function apiRequest(endpoint, params, token = '', deviceId = '', accept = 
     return text;
 }
 
-async function apiGetLastSite(token, userId, deviceId) {
+async function apiGetLastSite(token, userId, deviceId, deviceInfo) {
     const url = `${CONFIG.API_BASE}/api_mobile/last_site.php?token=${encodeURIComponent(token)}&user_id=${encodeURIComponent(userId)}`;
-    const params = { token, user_id: String(userId) };
+    // CRITICAL: Must include device fields in body (without them server returns "Bad device")
+    const params = { token, user_id: String(userId), ...deviceInfo };
     const body = new URLSearchParams(params).toString();
     const timestamp = String(Math.floor(Date.now() / 1000));
     const nonce = uuidv4().replace(/-/g, '');
@@ -133,7 +135,6 @@ async function apiGetLastSite(token, userId, deviceId) {
         'X-ST-Signature': signature,
     };
 
-    // This endpoint uses GET with query params but still needs signed POST-like headers
     const response = await fetch(url, { method: 'POST', headers, body });
     return await response.text();
 }
@@ -236,7 +237,7 @@ class BotSession {
 
     async fetchSites() {
         if (!this.token || !this.userId) return [];
-        const html = await apiGetLastSite(this.token, this.userId, this.deviceId);
+        const html = await apiGetLastSite(this.token, this.userId, this.deviceId, this.deviceInfo);
         return parseSiteList(html);
     }
 
@@ -267,15 +268,21 @@ class BotSession {
     }
 
     async runLoop(subIndex, emitLog) {
+        let consecutiveEmpty = 0;
         while (this.running) {
             try {
                 // Fetch available sites
                 const sites = await this.fetchSites();
                 if (!sites || sites.length === 0) {
-                    emitLog(`[${this.email}#${subIndex}] Sem sites disponíveis, aguardando...`);
-                    await sleep(CONFIG.POLL_INTERVAL);
+                    consecutiveEmpty++;
+                    if (consecutiveEmpty <= 3 || consecutiveEmpty % 10 === 0) {
+                        emitLog(`[${this.email}#${subIndex}] Sem sites disponíveis (${consecutiveEmpty}x), aguardando ${Math.min(consecutiveEmpty * 5, 30)}s...`);
+                    }
+                    // Exponential backoff: 5s, 10s, 15s... max 30s
+                    await sleep(Math.min(consecutiveEmpty * 5000, 30000));
                     continue;
                 }
+                consecutiveEmpty = 0;
 
                 // Pick a random site
                 const site = sites[Math.floor(Math.random() * Math.min(sites.length, 10))];
