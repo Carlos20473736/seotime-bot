@@ -180,7 +180,7 @@ class BotSession {
         this.subSessions = [];
     }
 
-    async login() {
+    async login(emitLog = null, maxRetries = 5) {
         const params = {
             login: this.email,
             password: this.password,
@@ -190,15 +190,36 @@ class BotSession {
             ...this.deviceInfo
         };
 
-        const result = await apiRequest('/api_mobile/mobile_login.php', params, '', this.deviceId);
-        if (result.ok) {
-            this.token = result.token;
-            this.userId = result.id;
-            this.username = result.username;
-            this.status = 'logged_in';
-            return { success: true, username: result.username, money: result.money };
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            const result = await apiRequest('/api_mobile/mobile_login.php', params, '', this.deviceId);
+            if (result.ok) {
+                this.token = result.token;
+                this.userId = result.id;
+                this.username = result.username;
+                this.status = 'logged_in';
+                return { success: true, username: result.username, money: result.money };
+            }
+
+            // Check for rate limit (retry_after field or "Подождите" message)
+            if (result.retry_after || (result.error && result.error.includes('Подождите'))) {
+                let waitSec = result.retry_after || 60;
+                // Parse from error message like "Подождите 1:52 мин."
+                if (!result.retry_after && result.error) {
+                    const match = result.error.match(/(\d+):(\d+)/);
+                    if (match) {
+                        waitSec = parseInt(match[1]) * 60 + parseInt(match[2]) + 5;
+                    }
+                }
+                if (emitLog) emitLog(`[${this.email}] ⏳ Rate limit - aguardando ${waitSec}s (tentativa ${attempt}/${maxRetries})...`);
+                this.status = 'rate_limited';
+                await sleep((waitSec + 2) * 1000);
+                continue;
+            }
+
+            // Other error - no retry
+            return { success: false, error: result.error || 'Login failed' };
         }
-        return { success: false, error: result.error || 'Login failed' };
+        return { success: false, error: 'Max retries exceeded (rate limit)' };
     }
 
     async ping() {
@@ -309,14 +330,14 @@ class BotSession {
         this.status = 'logging_in';
 
         emitLog(`[${this.email}] Fazendo login...`);
-        const loginResult = await this.login();
+        const loginResult = await this.login(emitLog);
         if (!loginResult.success) {
             emitLog(`[${this.email}] ✗ Login falhou: ${loginResult.error}`);
             this.running = false;
             this.status = 'error';
             return;
         }
-        emitLog(`[${this.email}] ✓ Login OK! User: ${this.username}`);
+        emitLog(`[${this.email}] ✓ Login OK! User: ${this.username}, Saldo: ${loginResult.money}₽`);
 
         // Start ping loop
         this.pingInterval = setInterval(async () => {
