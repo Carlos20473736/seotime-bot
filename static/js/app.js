@@ -79,7 +79,7 @@ function stopAll() {
     socket.emit('stop_all');
     document.getElementById('btn_start').disabled = false;
     document.getElementById('btn_start').style.opacity = '1';
-    document.getElementById('sessions_table').innerHTML = '<tr class="empty-row"><td colspan="8">Nenhuma sessão ativa</td></tr>';
+    document.getElementById('sessions_table').innerHTML = '<tr class="empty-row"><td colspan="9">Nenhuma sessão ativa</td></tr>';
 }
 
 // ─── Logging ──────────────────────────────────────────────────────────────────
@@ -159,12 +159,13 @@ socket.on('session_update', (data) => {
         <td style="color: ${statusColor}">${data.status}</td>
         <td>${data.views}</td>
         <td>${data.earned} ₽</td>
+        <td class="balance">${data.balance || '0.0000'} ₽</td>
         <td title="${data.currentSite}">${data.currentSite}</td>
     `;
 });
 
 socket.on('sessions_clear', () => {
-    document.getElementById('sessions_table').innerHTML = '<tr class="empty-row"><td colspan="8">Nenhuma sessão ativa</td></tr>';
+    document.getElementById('sessions_table').innerHTML = '<tr class="empty-row"><td colspan="9">Nenhuma sessão ativa</td></tr>';
 });
 
 socket.on('online_users', (users) => {

@@ -249,6 +249,7 @@ class BotSession {
             status: this.status,
             views: this.views,
             earned: this.earned.toFixed(4),
+            balance: this.accountBalance || '0.0000',
             currentSite: this.currentSite ? this.currentSite.substring(0, 50) + '...' : '-',
         };
     }
@@ -422,7 +423,20 @@ class BotSession {
                 if (completeResult && completeResult.ok) {
                     this.views++;
                     this.earned += parseFloat(site.reward);
-                    this.addLog(`[${this.email}#${subIndex}] ✓ View concluída! +${site.reward}₽ (Total: ${this.views} views, ${this.earned.toFixed(4)}₽)`, 'success');
+                    // Update balance from ping
+                    let balanceStr = '';
+                    try {
+                        const stats = await this.todayStats();
+                        if (stats && stats.money !== undefined) {
+                            this.accountBalance = stats.money;
+                            balanceStr = ` | Saldo conta: ${this.accountBalance}₽`;
+                        } else if (this.accountBalance) {
+                            balanceStr = ` | Saldo conta: ~${this.accountBalance}₽`;
+                        }
+                    } catch(e) {
+                        if (this.accountBalance) balanceStr = ` | Saldo conta: ~${this.accountBalance}₽`;
+                    }
+                    this.addLog(`[${this.email}#${subIndex}] ✓ View concluída! +${site.reward}₽ (Sessão: ${this.views} views, ${this.earned.toFixed(4)}₽${balanceStr})`, 'success');
                 } else {
                     this.addLog(`[${this.email}#${subIndex}] ✗ Erro ao completar: ${completeResult?.error || 'unknown'}`, 'error');
                 }
@@ -486,12 +500,18 @@ class BotSession {
             this.running = false;
             return this.start();
         }
-        this.addLog(`[${this.email}] ✓ Login OK! User: ${this.username}, Saldo: ${loginResult.money}₽`, 'success');
+        this.accountBalance = loginResult.money || '0.0000';
+        this.addLog(`[${this.email}] ✓ Login OK! User: ${this.username}, Saldo total da conta: ${this.accountBalance}₽`, 'success');
 
-        // Start ping loop (every 60s)
+        // Start ping loop (every 60s) + update balance
         this.pingInterval = setInterval(async () => {
             if (!this.stopRequested && this.token) {
-                try { await this.ping(); } catch (e) {}
+                try {
+                    const pingResult = await this.ping();
+                    if (pingResult && pingResult.money !== undefined) {
+                        this.accountBalance = pingResult.money;
+                    }
+                } catch (e) {}
             }
         }, 60000);
 
