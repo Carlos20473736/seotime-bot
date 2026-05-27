@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SeoTime Multi-Bot</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="header">
+        <div class="header-logos">
+            <img src="/static/img/logo_time.png" alt="Logo" onerror="this.style.display='none'">
+            <h1>SEOTIME BOT</h1>
+            <img src="/static/img/logo_bot.png" alt="Bot" onerror="this.style.display='none'">
+        </div>
+        <div class="subtitle">Multi-Session Automation System v1.0.0</div>
+    </div>
+
+    <div class="container">
+        <!-- Accounts Section -->
+        <div class="card">
+            <div class="card-title">🔑 CONTAS SEOTIME.BIZ</div>
+            <div class="account-info">
+                Adicione até 20 contas. Cada conta terá suas próprias sessões independentes.
+                O bot faz login automático via API mobile e inicia a coleta de views.
+            </div>
+            <div class="account-info">Contas: <span id="account_count">1</span>/20</div>
+
+            <div id="accounts_container">
+                <div class="account-row" data-index="0">
+                    <span class="num">1</span>
+                    <input type="text" placeholder="Email / Login" class="acc-email">
+                    <input type="password" placeholder="Senha" class="acc-password">
+                    <input type="number" value="1" min="1" max="15" class="acc-sessions" title="Sessões simultâneas">
+                    <span class="label-sess">sess.</span>
+                    <button class="btn-remove" onclick="removeAccount(this)" title="Remover conta">✕</button>
+                </div>
+            </div>
+
+            <button class="btn btn-add" id="btn_add_account" onclick="addAccount()">
+                + ADICIONAR CONTA (<span id="add_count">1</span>/20)
+            </button>
+
+            <label class="proxy-toggle">
+                <input type="checkbox" id="proxy_enabled">
+                🌐 USAR PROXY (DataImpulse)
+            </label>
+
+            <div class="controls">
+                <button class="btn btn-start" id="btn_start" onclick="startAll()">▶ INICIAR TODAS</button>
+                <button class="btn btn-stop" id="btn_stop" onclick="stopAll()">■ PARAR TODAS</button>
+            </div>
+        </div>
+
+        <!-- Stats -->
+        <div class="stats-grid">
+            <div class="stat-box status">
+                <div class="value">
+                    <span class="status-dot" id="status_dot"></span>
+                    <span id="status_text">OFFLINE</span>
+                </div>
+                <div class="label">Status</div>
+            </div>
+            <div class="stat-box">
+                <div class="value" id="stat_earned">0.000 ₽</div>
+                <div class="label">Ganho Total</div>
+            </div>
+            <div class="stat-box">
+                <div class="value" id="stat_views">0</div>
+                <div class="label">Views</div>
+            </div>
+            <div class="stat-box">
+                <div class="value" id="stat_sessions">0</div>
+                <div class="label">Sessões Ativas</div>
+            </div>
+        </div>
+
+        <!-- Active Sessions Table -->
+        <div class="card">
+            <div class="card-title">📡 SESSÕES ATIVAS</div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Conta</th>
+                            <th>#</th>
+                            <th>Dispositivo</th>
+                            <th>IP</th>
+                            <th>Status</th>
+                            <th>Views</th>
+                            <th>Ganho</th>
+                            <th>Site Atual</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sessions_table">
+                        <tr class="empty-row"><td colspan="8">Nenhuma sessão ativa</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Logs -->
+        <div class="card">
+            <div class="card-title">📋 LOGS</div>
+            <div class="log-box" id="log_box">
+                <div class="log-entry info">Sistema pronto. Adicione suas contas e clique INICIAR TODAS.</div>
+            </div>
+        </div>
+
+        <!-- Online Users -->
+        <div class="card">
+            <div class="card-title">
+                👥 USUÁRIOS ONLINE
+                <span class="online-badge" id="online_count">0</span>
+            </div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Email</th>
+                            <th>Sessões</th>
+                            <th>Views</th>
+                            <th>Ganho</th>
+                            <th>Desde</th>
+                        </tr>
+                    </thead>
+                    <tbody id="online_table">
+                        <tr class="empty-row"><td colspan="6">Nenhum usuário online</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">
+        SeoTime Multi-Bot &copy; 2026 | Use por sua conta e risco
+        <a href="/trap">admin panel</a>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

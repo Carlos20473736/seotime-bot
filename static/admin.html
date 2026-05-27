@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SeoTime Bot - Admin</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="header">
+        <h1>SEOTIME BOT - ADMIN</h1>
+        <div class="subtitle">Painel de Administração</div>
+    </div>
+    <div class="container">
+        <div class="card">
+            <div class="card-title">⚙️ CONFIGURAÇÕES DO SISTEMA</div>
+            <div class="account-info">
+                <p><strong>API Base:</strong> https://seotime.biz</p>
+                <p><strong>Versão do Bot:</strong> 1.0.0</p>
+                <p><strong>Max Contas:</strong> 20</p>
+                <p><strong>Intervalo de Poll:</strong> 30s</p>
+                <p><strong>Extra Wait:</strong> 2s</p>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">👥 SESSÕES GLOBAIS ATIVAS</div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Email</th>
+                            <th>Status</th>
+                            <th>Views</th>
+                            <th>Ganho</th>
+                            <th>Uptime</th>
+                        </tr>
+                    </thead>
+                    <tbody id="admin_sessions">
+                        <tr class="empty-row"><td colspan="6">Carregando...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">
+        <a href="/">← Voltar ao Painel Principal</a>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        socket.on('online_users', (users) => {
+            const tbody = document.getElementById('admin_sessions');
+            if (users.length === 0) {
+                tbody.innerHTML = '<tr class="empty-row"><td colspan="6">Nenhuma sessão ativa</td></tr>';
+                return;
+            }
+            tbody.innerHTML = users.map(u => `
+                <tr>
+                    <td>${u.index}</td>
+                    <td>${u.email}</td>
+                    <td style="color: var(--success)">ONLINE</td>
+                    <td>${u.views}</td>
+                    <td>${u.earned} ₽</td>
+                    <td>${u.since}</td>
+                </tr>
+            `).join('');
+        });
+    </script>
+</body>
+</html>

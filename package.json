@@ -1,0 +1,21 @@
+{
+  "name": "seotime-bot",
+  "version": "1.0.0",
+  "description": "SeoTime Multi-Bot - Multi-Session Automation System",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": ["seotime", "bot", "automation"],
+  "author": "",
+  "license": "ISC",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "socket.io": "^4.8.3",
+    "uuid": "^14.0.0"
+  }
+}
